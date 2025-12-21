@@ -1,0 +1,325 @@
+---
+sidebar_position: 1
+title: What is Physical AI?
+description: Introduction to Physical AI and embodied intelligence
+keywords: [physical-ai, embodied-intelligence, robotics, ai]
+# Instructor metadata (T075)
+week: 1
+estimated_time: 45
+difficulty: beginner
+learning_objectives:
+  - Define Physical AI and explain how it differs from traditional AI
+  - Describe the key challenges of embodied intelligence
+  - Identify the core components of a Physical AI system
+  - Explain why humanoid robots are gaining importance in AI research
+prerequisites: []
+---
+
+# What is Physical AI?
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Define Physical AI and explain how it differs from traditional AI
+2. Describe the key challenges of embodied intelligence
+3. Identify the core components of a Physical AI system
+4. Explain why humanoid robots are gaining importance in AI research
+
+---
+
+## Introduction
+
+**Physical AI** refers to artificial intelligence systems that interact with the physical world through sensors and actuators. Unlike purely digital AI that processes data in a virtual environment, Physical AI must navigate the complexities of real-world physics, uncertainty, and real-time constraints.
+
+:::info Key Insight
+Physical AI is not just about building smart robots—it's about creating intelligent systems that can perceive, reason, and act in the physical world safely and effectively.
+:::
+
+## The Evolution from Digital to Physical AI
+
+Traditional AI systems, like language models or image classifiers, operate in well-defined digital environments:
+
+- **Input**: Structured data (text, images, numbers)
+- **Processing**: Computation on servers
+- **Output**: Predictions, classifications, generated content
+
+Physical AI systems face additional challenges:
+
+- **Input**: Noisy sensor data from cameras, LiDAR, IMUs
+- **Processing**: Real-time computation with strict latency requirements
+- **Output**: Physical actions that must be safe and precise
+
+## Core Components of Physical AI
+
+A typical Physical AI system consists of several interconnected components:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Physical AI System                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌──────────┐    ┌───────────────┐    ┌──────────────────┐  │
+│  │ Sensors  │ -> │  Perception   │ -> │ World Model      │  │
+│  │          │    │  (Computer    │    │ (Scene Graph,    │  │
+│  │ - Camera │    │   Vision,     │    │  Semantic Map)   │  │
+│  │ - LiDAR  │    │   3D Recon)   │    │                  │  │
+│  │ - IMU    │    │               │    │                  │  │
+│  └──────────┘    └───────────────┘    └────────┬─────────┘  │
+│                                                 │            │
+│  ┌──────────┐    ┌───────────────┐    ┌────────▼─────────┐  │
+│  │Actuators │ <- │  Control      │ <- │ Planning &       │  │
+│  │          │    │  (Motor       │    │ Decision Making  │  │
+│  │ - Motors │    │   Commands,   │    │ (Task Planning,  │  │
+│  │ - Joints │    │   PID)        │    │  Path Planning)  │  │
+│  └──────────┘    └───────────────┘    └──────────────────┘  │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 1. Perception
+
+The perception layer converts raw sensor data into meaningful representations:
+
+<Tabs>
+  <TabItem value="camera" label="Camera" default>
+    Cameras provide rich visual information for object detection, scene understanding, and visual SLAM.
+
+    ```python
+    import cv2
+    import numpy as np
+
+    def process_camera_frame(frame: np.ndarray) -> dict:
+        """Process a camera frame for object detection."""
+        # Convert to RGB for neural network input
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Normalize pixel values
+        normalized = rgb_frame.astype(np.float32) / 255.0
+
+        return {
+            "rgb": normalized,
+            "shape": frame.shape,
+            "timestamp": time.time()
+        }
+    ```
+  </TabItem>
+  <TabItem value="lidar" label="LiDAR">
+    LiDAR sensors provide precise 3D distance measurements for mapping and obstacle detection.
+
+    ```python
+    import numpy as np
+
+    def process_lidar_scan(points: np.ndarray) -> dict:
+        """Process LiDAR point cloud data."""
+        # points shape: (N, 3) for x, y, z coordinates
+
+        # Filter ground plane (simple threshold)
+        non_ground = points[points[:, 2] > 0.1]
+
+        # Calculate distance from sensor
+        distances = np.linalg.norm(non_ground, axis=1)
+
+        return {
+            "points": non_ground,
+            "min_distance": distances.min(),
+            "max_distance": distances.max()
+        }
+    ```
+  </TabItem>
+  <TabItem value="imu" label="IMU">
+    Inertial Measurement Units track orientation and acceleration for balance and motion estimation.
+
+    ```python
+    from dataclasses import dataclass
+
+    @dataclass
+    class IMUReading:
+        """IMU sensor reading."""
+        accelerometer: tuple[float, float, float]  # m/s²
+        gyroscope: tuple[float, float, float]      # rad/s
+        magnetometer: tuple[float, float, float]   # μT
+        timestamp: float
+
+    def estimate_orientation(imu: IMUReading) -> tuple:
+        """Estimate roll and pitch from accelerometer."""
+        ax, ay, az = imu.accelerometer
+
+        roll = np.arctan2(ay, az)
+        pitch = np.arctan2(-ax, np.sqrt(ay**2 + az**2))
+
+        return roll, pitch
+    ```
+  </TabItem>
+</Tabs>
+
+### 2. World Model
+
+The world model maintains a representation of the environment:
+
+```python
+from dataclasses import dataclass, field
+from typing import Dict, List
+
+@dataclass
+class WorldObject:
+    """Represents an object in the world model."""
+    id: str
+    class_name: str
+    position: tuple[float, float, float]
+    orientation: tuple[float, float, float, float]  # quaternion
+    confidence: float
+    last_seen: float
+
+@dataclass
+class WorldModel:
+    """Maintains the robot's understanding of its environment."""
+    objects: Dict[str, WorldObject] = field(default_factory=dict)
+    robot_pose: tuple = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)  # x, y, z, roll, pitch, yaw
+
+    def update_object(self, obj: WorldObject) -> None:
+        """Update or add an object to the world model."""
+        self.objects[obj.id] = obj
+
+    def get_nearby_objects(self, radius: float) -> List[WorldObject]:
+        """Get objects within a certain radius of the robot."""
+        rx, ry, rz = self.robot_pose[:3]
+        nearby = []
+        for obj in self.objects.values():
+            dist = ((obj.position[0] - rx)**2 +
+                   (obj.position[1] - ry)**2 +
+                   (obj.position[2] - rz)**2) ** 0.5
+            if dist <= radius:
+                nearby.append(obj)
+        return nearby
+```
+
+### 3. Planning and Decision Making
+
+The planning layer determines what actions to take:
+
+```python
+from enum import Enum
+from typing import Optional
+
+class RobotTask(Enum):
+    IDLE = "idle"
+    NAVIGATE = "navigate"
+    MANIPULATE = "manipulate"
+    EXPLORE = "explore"
+
+class TaskPlanner:
+    """High-level task planning for the robot."""
+
+    def __init__(self, world_model: WorldModel):
+        self.world_model = world_model
+        self.current_task: Optional[RobotTask] = None
+
+    def plan_next_action(self, goal: str) -> RobotTask:
+        """Determine the next task based on the goal."""
+        # Simple goal parsing (in practice, use LLM or planner)
+        if "go to" in goal.lower():
+            return RobotTask.NAVIGATE
+        elif "pick up" in goal.lower():
+            return RobotTask.MANIPULATE
+        elif "explore" in goal.lower():
+            return RobotTask.EXPLORE
+        return RobotTask.IDLE
+```
+
+## The Embodiment Hypothesis
+
+A key principle in Physical AI is the **embodiment hypothesis**: intelligence arises from the interaction between an agent's body and its environment. This contrasts with the view that intelligence is purely computational.
+
+:::tip Embodiment in Practice
+Consider how a human learns to catch a ball. This skill requires:
+- Visual processing of ball trajectory
+- Proprioception (sensing limb positions)
+- Motor coordination
+- Real-time adjustment based on feedback
+
+This integrated sensorimotor loop cannot be replicated by a disembodied AI.
+:::
+
+## Why Humanoid Robots?
+
+Humanoid robots are designed to operate in human environments:
+
+| Feature | Advantage |
+|---------|-----------|
+| **Bipedal locomotion** | Navigate stairs, step over obstacles |
+| **Human-scale** | Use human tools and furniture |
+| **Anthropomorphic hands** | Manipulate objects designed for humans |
+| **Social presence** | Natural interaction with people |
+
+## Summary
+
+- **Physical AI** bridges the gap between digital intelligence and physical action
+- Core components include perception, world modeling, planning, and control
+- The **embodiment hypothesis** suggests that true intelligence requires physical interaction
+- **Humanoid robots** are designed to operate seamlessly in human environments
+
+## What's Next?
+
+In the next chapter, we'll dive deep into **sensor systems** that enable robots to perceive their environment.
+
+---
+
+## Exercises
+
+import { Exercise } from '@site/src/components/Exercise';
+
+<Exercise
+  title="Concept Check: Physical AI Fundamentals"
+  difficulty="beginner"
+  estimatedTime={10}
+  type="conceptual"
+>
+
+Answer the following questions:
+
+1. What are the three main differences between traditional AI and Physical AI?
+2. Name the four core components of a Physical AI system.
+3. Explain the embodiment hypothesis in your own words.
+
+</Exercise>
+
+<Exercise
+  title="Code Analysis: Extending the World Model"
+  difficulty="intermediate"
+  estimatedTime={20}
+  type="coding"
+  hint="You'll need to compare the current timestamp with the object's last_seen attribute."
+>
+
+Modify the `WorldModel` class to include a method that removes objects not seen in the last 30 seconds.
+
+Then, extend the `IMUReading` class to calculate the magnitude of acceleration using the formula:
+`magnitude = sqrt(ax² + ay² + az²)`
+
+</Exercise>
+
+<Exercise
+  title="System Design: Robot State Machine"
+  difficulty="advanced"
+  estimatedTime={45}
+  type="hands-on"
+  hint="Consider what sensors are needed to detect when each state transition should occur. Think about edge cases like the object not being found or obstacles blocking the path."
+>
+
+Design a state machine for a robot that must:
+- Search for an object
+- Navigate to the object
+- Pick up the object
+- Return to its starting position
+
+Your design should include:
+1. State diagram with all states and transitions
+2. Sensor data required for each state transition
+3. Error handling states (e.g., object not found, path blocked)
+4. Pseudocode for the main control loop
+
+</Exercise>

@@ -1,0 +1,99 @@
+/* Progress Tracker Styles */
+
+.progressTracker {
+  padding: 1rem;
+  background-color: var(--ifm-card-background-color);
+  border-radius: var(--ifm-card-border-radius);
+  border: 1px solid var(--ifm-color-emphasis-200);
+}
+
+.header {
+  margin-bottom: 0.75rem;
+}
+
+.title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--ifm-heading-color);
+}
+
+.content {
+  font-size: 0.875rem;
+  color: var(--ifm-color-emphasis-600);
+}
+
+.placeholder {
+  margin: 0;
+  font-style: italic;
+}
+
+/* Module Progress */
+
+.moduleProgress {
+  padding: 0.75rem;
+  border-radius: var(--ifm-global-radius);
+  background-color: var(--ifm-color-emphasis-100);
+  position: relative;
+}
+
+.moduleProgress + .moduleProgress {
+  margin-top: 0.5rem;
+}
+
+.moduleHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.moduleTitle {
+  font-weight: 500;
+  color: var(--ifm-color-emphasis-800);
+}
+
+.moduleStatus {
+  font-size: 0.75rem;
+  color: var(--ifm-color-emphasis-600);
+}
+
+.progressBarContainer {
+  height: 6px;
+  background-color: var(--ifm-color-emphasis-200);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progressBar {
+  height: 100%;
+  background-color: var(--ifm-color-primary);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.progressComplete {
+  background-color: var(--ifm-color-success);
+}
+
+.completeIndicator {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  color: var(--ifm-color-success);
+  font-size: 0.875rem;
+}
+
+/* Responsive */
+
+@media (max-width: 768px) {
+  .progressTracker {
+    padding: 0.75rem;
+  }
+
+  .moduleHeader {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+  }
+}

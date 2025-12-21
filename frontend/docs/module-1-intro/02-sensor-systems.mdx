@@ -1,0 +1,280 @@
+---
+sidebar_position: 2
+title: Sensor Systems
+description: Understanding sensors in robotics - cameras, LiDAR, and IMUs
+keywords: [sensors, lidar, camera, imu, perception]
+# Instructor metadata (T075)
+week: 1
+estimated_time: 50
+difficulty: beginner
+learning_objectives:
+  - Explain the role of different sensors in robotic perception
+  - Compare and contrast camera, LiDAR, and IMU technologies
+  - Understand sensor fusion concepts
+  - Choose appropriate sensors for different applications
+prerequisites:
+  - module-1-intro/01-what-is-physical-ai
+---
+
+# Sensor Systems for Physical AI
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Explain the role of different sensors in robotic perception
+2. Compare and contrast camera, LiDAR, and IMU technologies
+3. Understand sensor fusion concepts
+4. Choose appropriate sensors for different applications
+
+---
+
+## Introduction
+
+Sensors are the "eyes and ears" of a Physical AI system. They convert physical phenomena into electrical signals that can be processed by computers. The quality and reliability of sensor data fundamentally limits what a robot can perceive and accomplish.
+
+## Camera Systems
+
+### RGB Cameras
+
+Standard RGB cameras capture color images similar to human vision:
+
+```python
+import cv2
+import numpy as np
+from dataclasses import dataclass
+from typing import Tuple
+
+@dataclass
+class CameraIntrinsics:
+    """Camera intrinsic parameters."""
+    fx: float  # Focal length x (pixels)
+    fy: float  # Focal length y (pixels)
+    cx: float  # Principal point x (pixels)
+    cy: float  # Principal point y (pixels)
+
+    def project_point(self, point_3d: np.ndarray) -> Tuple[float, float]:
+        """Project a 3D point to 2D image coordinates."""
+        x, y, z = point_3d
+        u = (self.fx * x / z) + self.cx
+        v = (self.fy * y / z) + self.cy
+        return u, v
+
+# Example: Intel RealSense D435 camera intrinsics
+realsense_intrinsics = CameraIntrinsics(
+    fx=615.0,
+    fy=615.0,
+    cx=320.0,
+    cy=240.0
+)
+```
+
+### Depth Cameras
+
+Depth cameras provide per-pixel distance measurements:
+
+```python
+def process_depth_image(depth_frame: np.ndarray,
+                        intrinsics: CameraIntrinsics,
+                        max_depth: float = 10.0) -> np.ndarray:
+    """Convert depth image to 3D point cloud."""
+    height, width = depth_frame.shape
+
+    # Create pixel coordinate grids
+    u = np.arange(width)
+    v = np.arange(height)
+    u, v = np.meshgrid(u, v)
+
+    # Calculate 3D coordinates
+    z = depth_frame.astype(np.float32) / 1000.0  # mm to meters
+    x = (u - intrinsics.cx) * z / intrinsics.fx
+    y = (v - intrinsics.cy) * z / intrinsics.fy
+
+    # Stack into point cloud
+    points = np.stack([x, y, z], axis=-1)
+
+    # Filter invalid depths
+    valid_mask = (z > 0) & (z < max_depth)
+    return points[valid_mask]
+```
+
+## LiDAR Sensors
+
+LiDAR (Light Detection and Ranging) uses laser pulses to measure precise distances:
+
+```python
+from dataclasses import dataclass
+from typing import List
+import numpy as np
+
+@dataclass
+class LiDARScan:
+    """Represents a LiDAR scan."""
+    points: np.ndarray      # Shape: (N, 3) for x, y, z
+    intensities: np.ndarray # Shape: (N,) reflectivity values
+    timestamp: float
+
+    def filter_by_range(self, min_range: float, max_range: float) -> 'LiDARScan':
+        """Filter points by distance from sensor."""
+        distances = np.linalg.norm(self.points, axis=1)
+        mask = (distances >= min_range) & (distances <= max_range)
+        return LiDARScan(
+            points=self.points[mask],
+            intensities=self.intensities[mask],
+            timestamp=self.timestamp
+        )
+
+    def remove_ground_plane(self, height_threshold: float = 0.2) -> 'LiDARScan':
+        """Simple ground plane removal based on height."""
+        mask = self.points[:, 2] > height_threshold
+        return LiDARScan(
+            points=self.points[mask],
+            intensities=self.intensities[mask],
+            timestamp=self.timestamp
+        )
+```
+
+### LiDAR vs Camera Comparison
+
+| Feature | Camera | LiDAR |
+|---------|--------|-------|
+| **Range** | Limited (10-50m) | Excellent (100m+) |
+| **Accuracy** | Low depth accuracy | Centimeter precision |
+| **Lighting** | Affected by lighting | Works in darkness |
+| **Cost** | Low ($50-500) | High ($1k-100k) |
+| **Data rate** | 30-60 Hz | 10-20 Hz |
+| **Density** | Very high (megapixels) | Sparse (thousands of points) |
+
+## Inertial Measurement Units (IMU)
+
+IMUs measure linear acceleration and angular velocity:
+
+```python
+from dataclasses import dataclass
+import numpy as np
+from scipy.spatial.transform import Rotation
+
+@dataclass
+class IMUData:
+    """IMU measurement data."""
+    accel: np.ndarray  # Linear acceleration (m/s²)
+    gyro: np.ndarray   # Angular velocity (rad/s)
+    timestamp: float
+
+class IMUIntegrator:
+    """Integrates IMU data for pose estimation."""
+
+    def __init__(self):
+        self.orientation = Rotation.identity()
+        self.velocity = np.zeros(3)
+        self.position = np.zeros(3)
+        self.last_timestamp = None
+
+    def update(self, imu: IMUData) -> None:
+        """Update pose estimate with new IMU reading."""
+        if self.last_timestamp is None:
+            self.last_timestamp = imu.timestamp
+            return
+
+        dt = imu.timestamp - self.last_timestamp
+
+        # Update orientation (integrate gyroscope)
+        delta_rotation = Rotation.from_rotvec(imu.gyro * dt)
+        self.orientation = self.orientation * delta_rotation
+
+        # Remove gravity from accelerometer
+        gravity = np.array([0, 0, 9.81])
+        world_accel = self.orientation.apply(imu.accel) - gravity
+
+        # Update velocity and position
+        self.velocity += world_accel * dt
+        self.position += self.velocity * dt
+
+        self.last_timestamp = imu.timestamp
+
+    def get_pose(self) -> dict:
+        """Get current pose estimate."""
+        return {
+            "position": self.position.tolist(),
+            "orientation": self.orientation.as_quat().tolist(),
+            "velocity": self.velocity.tolist()
+        }
+```
+
+:::warning IMU Drift
+Raw IMU integration suffers from drift over time due to sensor noise and bias. In practice, IMU data must be fused with other sensors (camera, LiDAR, GPS) for accurate long-term pose estimation.
+:::
+
+## Sensor Fusion
+
+Combining multiple sensors improves reliability and accuracy:
+
+```python
+from typing import Optional
+import numpy as np
+
+class SensorFusion:
+    """Simple complementary filter for sensor fusion."""
+
+    def __init__(self, alpha: float = 0.98):
+        """
+        Args:
+            alpha: Weight for high-frequency sensor (gyro).
+                   1-alpha is weight for low-frequency sensor (accel).
+        """
+        self.alpha = alpha
+        self.roll = 0.0
+        self.pitch = 0.0
+
+    def update(self, accel: np.ndarray, gyro: np.ndarray, dt: float) -> tuple:
+        """
+        Fuse accelerometer and gyroscope data.
+
+        Args:
+            accel: Accelerometer reading (x, y, z) in m/s²
+            gyro: Gyroscope reading (x, y, z) in rad/s
+            dt: Time delta in seconds
+
+        Returns:
+            Tuple of (roll, pitch) in radians
+        """
+        # Roll and pitch from accelerometer
+        accel_roll = np.arctan2(accel[1], accel[2])
+        accel_pitch = np.arctan2(-accel[0],
+                                  np.sqrt(accel[1]**2 + accel[2]**2))
+
+        # Integrate gyroscope
+        self.roll += gyro[0] * dt
+        self.pitch += gyro[1] * dt
+
+        # Complementary filter
+        self.roll = self.alpha * self.roll + (1 - self.alpha) * accel_roll
+        self.pitch = self.alpha * self.pitch + (1 - self.alpha) * accel_pitch
+
+        return self.roll, self.pitch
+```
+
+## Summary
+
+- **Cameras** provide rich visual information but struggle with depth and lighting
+- **LiDAR** offers precise 3D measurements but is expensive and sparse
+- **IMUs** track motion at high frequency but suffer from drift
+- **Sensor fusion** combines strengths of multiple sensors
+
+---
+
+## Exercises
+
+### Easy
+
+1. What are the main components of an IMU?
+2. List three advantages of LiDAR over cameras.
+
+### Medium
+
+3. Implement a function that converts a depth image to a colorized visualization.
+4. Modify the `LiDARScan` class to include a method for detecting clusters of points.
+
+### Challenging
+
+5. Design a sensor suite for a delivery robot operating outdoors. Justify your choices.

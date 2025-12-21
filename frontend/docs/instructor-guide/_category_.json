@@ -1,0 +1,8 @@
+{
+  "label": "Instructor Guide",
+  "position": 10,
+  "link": {
+    "type": "generated-index",
+    "description": "Resources for instructors teaching the Physical AI course"
+  }
+}

@@ -1,0 +1,241 @@
+/**
+ * Physical AI Textbook - Custom Styles
+ *
+ * Uses Infima CSS variables for theming.
+ * See: https://infima.dev/docs/layout/typography
+ */
+
+/* Color palette */
+:root {
+  --ifm-color-primary: #4f46e5;
+  --ifm-color-primary-dark: #4338ca;
+  --ifm-color-primary-darker: #3730a3;
+  --ifm-color-primary-darkest: #312e81;
+  --ifm-color-primary-light: #6366f1;
+  --ifm-color-primary-lighter: #818cf8;
+  --ifm-color-primary-lightest: #a5b4fc;
+
+  --ifm-code-font-size: 95%;
+  --ifm-font-family-base: system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --ifm-font-family-monospace: "JetBrains Mono", "Fira Code", Menlo, Monaco,
+    Consolas, "Liberation Mono", monospace;
+
+  /* Card styling */
+  --ifm-card-background-color: #ffffff;
+  --ifm-card-border-radius: 8px;
+
+  /* Global radius */
+  --ifm-global-radius: 6px;
+
+  /* Spacing */
+  --ifm-spacing-horizontal: 1rem;
+  --ifm-spacing-vertical: 1rem;
+}
+
+/* Dark mode colors */
+[data-theme="dark"] {
+  --ifm-color-primary: #818cf8;
+  --ifm-color-primary-dark: #6366f1;
+  --ifm-color-primary-darker: #4f46e5;
+  --ifm-color-primary-darkest: #4338ca;
+  --ifm-color-primary-light: #a5b4fc;
+  --ifm-color-primary-lighter: #c7d2fe;
+  --ifm-color-primary-lightest: #e0e7ff;
+
+  --ifm-card-background-color: #1e1e1e;
+  --ifm-background-surface-color: #121212;
+}
+
+/* Typography */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-weight: 600;
+}
+
+/* Code blocks */
+.prism-code {
+  position: relative;
+}
+
+code {
+  font-family: var(--ifm-font-family-monospace);
+}
+
+/* Docusaurus admonitions */
+.alert {
+  --ifm-alert-padding-horizontal: 1rem;
+  --ifm-alert-padding-vertical: 0.75rem;
+  border-radius: var(--ifm-global-radius);
+}
+
+/* Table styling */
+table {
+  display: table;
+  width: 100%;
+  border-collapse: collapse;
+}
+
+table th,
+table td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--ifm-color-emphasis-200);
+}
+
+table th {
+  background-color: var(--ifm-color-emphasis-100);
+  font-weight: 600;
+  text-align: left;
+}
+
+table tr:hover {
+  background-color: var(--ifm-color-emphasis-50);
+}
+
+/* Sidebar enhancements */
+.menu__link {
+  border-radius: var(--ifm-global-radius);
+  padding: 0.5rem 0.75rem;
+}
+
+.menu__link--active {
+  background-color: var(--ifm-color-primary-lightest);
+  color: var(--ifm-color-primary-darkest);
+}
+
+[data-theme="dark"] .menu__link--active {
+  background-color: rgba(99, 102, 241, 0.2);
+  color: var(--ifm-color-primary-light);
+}
+
+/* Learning objectives styling */
+.learning-objectives {
+  background-color: var(--ifm-color-emphasis-100);
+  border-left: 4px solid var(--ifm-color-primary);
+  padding: 1rem 1.5rem;
+  margin-bottom: 1.5rem;
+  border-radius: var(--ifm-global-radius);
+}
+
+.learning-objectives h2 {
+  margin-top: 0;
+  font-size: 1.1rem;
+}
+
+.learning-objectives ol {
+  margin-bottom: 0;
+}
+
+/* Exercise styling */
+.exercise {
+  background-color: var(--ifm-color-emphasis-50);
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: var(--ifm-global-radius);
+  padding: 1rem;
+  margin: 1rem 0;
+}
+
+.exercise-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.exercise-title {
+  font-weight: 600;
+  margin: 0;
+}
+
+.exercise-difficulty {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--ifm-global-radius);
+  text-transform: uppercase;
+}
+
+.exercise-difficulty.easy {
+  background-color: var(--ifm-color-success-lightest);
+  color: var(--ifm-color-success-darkest);
+}
+
+.exercise-difficulty.medium {
+  background-color: var(--ifm-color-warning-lightest);
+  color: var(--ifm-color-warning-darkest);
+}
+
+.exercise-difficulty.challenging {
+  background-color: var(--ifm-color-danger-lightest);
+  color: var(--ifm-color-danger-darkest);
+}
+
+/* Tabs styling */
+.tabs__item {
+  border-radius: var(--ifm-global-radius) var(--ifm-global-radius) 0 0;
+}
+
+/* ASCII art / diagrams in code blocks */
+pre code {
+  white-space: pre;
+  word-wrap: normal;
+  overflow-x: auto;
+}
+
+/* Footer */
+.footer {
+  --ifm-footer-background-color: var(--ifm-color-emphasis-100);
+}
+
+[data-theme="dark"] .footer {
+  --ifm-footer-background-color: #1a1a1a;
+}
+
+/* Responsive adjustments */
+@media (max-width: 996px) {
+  .navbar__title {
+    display: none;
+  }
+}
+
+@media (max-width: 768px) {
+  h1 {
+    font-size: 1.75rem;
+  }
+
+  h2 {
+    font-size: 1.5rem;
+  }
+
+  table {
+    font-size: 0.875rem;
+  }
+
+  table th,
+  table td {
+    padding: 0.5rem;
+  }
+}
+
+/* Print styles */
+@media print {
+  .navbar,
+  .footer,
+  .menu,
+  .theme-doc-toc-mobile,
+  .theme-doc-toc-desktop {
+    display: none !important;
+  }
+
+  .main-wrapper {
+    padding: 0;
+  }
+
+  .container {
+    max-width: 100%;
+  }
+}

@@ -1,0 +1,824 @@
+openapi: 3.1.0
+info:
+  title: Physical AI Textbook API
+  description: |
+    Backend API for the Physical AI & Humanoid Robotics Textbook platform.
+    Provides authentication, RAG-powered chat, and progress tracking.
+  version: 1.0.0
+  contact:
+    name: Panaversity
+    url: https://panaversity.com
+
+servers:
+  - url: https://api.physical-ai-textbook.example.com
+    description: Production server
+  - url: http://localhost:8000
+    description: Local development
+
+tags:
+  - name: auth
+    description: Authentication endpoints
+  - name: chat
+    description: RAG chatbot endpoints
+  - name: progress
+    description: Progress tracking endpoints
+  - name: health
+    description: Health check endpoints
+
+paths:
+  # ============ Health ============
+  /api/health:
+    get:
+      tags: [health]
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  # ============ Authentication ============
+  /api/auth/register:
+    post:
+      tags: [auth]
+      summary: Register new user
+      operationId: registerUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreate'
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Email already registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/auth/login:
+    post:
+      tags: [auth]
+      summary: Login and get tokens
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserLogin'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Refresh access token
+      operationId: refreshToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+      responses:
+        '200':
+          description: Tokens refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '401':
+          description: Invalid or expired refresh token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      summary: Logout and revoke tokens
+      operationId: logoutUser
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Logout successful
+        '401':
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/auth/me:
+    get:
+      tags: [auth]
+      summary: Get current user profile
+      operationId: getCurrentUser
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ============ Chat ============
+  /api/chat/query:
+    post:
+      tags: [chat]
+      summary: Query the RAG chatbot
+      description: |
+        Send a question to the chatbot. Optionally include selected text
+        for context-aware responses. Returns complete response.
+      operationId: queryChat
+      security:
+        - bearerAuth: []
+        - {}  # Also allows unauthenticated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatQuery'
+      responses:
+        '200':
+          description: Chat response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: AI service unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/chat/query/stream:
+    post:
+      tags: [chat]
+      summary: Query chatbot with streaming response
+      description: |
+        Same as /query but returns Server-Sent Events for real-time streaming.
+        First event contains sources, subsequent events contain response chunks.
+      operationId: queryChatStream
+      security:
+        - bearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatQuery'
+      responses:
+        '200':
+          description: Streaming response
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE stream with events:
+                  - type: "sources" - Retrieved context chunks
+                  - type: "chunk" - Response text chunk
+                  - type: "done" - Stream complete
+
+  /api/chat/sessions:
+    get:
+      tags: [chat]
+      summary: List user's chat sessions
+      operationId: listChatSessions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: include_inactive
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Chat sessions list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ChatSessionSummary'
+
+  /api/chat/sessions/{session_id}:
+    get:
+      tags: [chat]
+      summary: Get chat session with messages
+      operationId: getChatSession
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: before_sequence
+          in: query
+          description: Pagination - get messages before this sequence number
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Chat session with messages
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatSessionDetail'
+        '404':
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags: [chat]
+      summary: Archive a chat session
+      operationId: archiveChatSession
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Session archived
+        '404':
+          description: Session not found
+
+  /api/chat/messages/{message_id}/feedback:
+    post:
+      tags: [chat]
+      summary: Submit feedback for a message
+      operationId: submitMessageFeedback
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageFeedback'
+      responses:
+        '204':
+          description: Feedback recorded
+        '404':
+          description: Message not found
+
+  # ============ Progress ============
+  /api/progress:
+    get:
+      tags: [progress]
+      summary: Get user's progress summary
+      operationId: getProgressSummary
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Progress summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProgressSummary'
+
+  /api/progress/resume:
+    get:
+      tags: [progress]
+      summary: Get resume position
+      description: Returns the most recent in-progress content for "Continue Reading" feature
+      operationId: getResumePosition
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Resume position
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResumePosition'
+        '404':
+          description: No in-progress content found
+
+  /api/progress/modules:
+    get:
+      tags: [progress]
+      summary: Get module-level progress
+      operationId: getModuleProgress
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Module progress list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ModuleProgressResponse'
+
+  /api/progress/{content_id}:
+    get:
+      tags: [progress]
+      summary: Get progress for specific content
+      operationId: getContentProgress
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: content_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: module-2/chapter-1
+      responses:
+        '200':
+          description: Content progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProgressResponse'
+        '404':
+          description: No progress found for this content
+
+    patch:
+      tags: [progress]
+      summary: Update progress for content
+      operationId: updateContentProgress
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: content_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProgressUpdate'
+      responses:
+        '200':
+          description: Progress updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProgressResponse'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # ============ Health ============
+    HealthResponse:
+      type: object
+      required: [status, database, timestamp]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+        database:
+          type: boolean
+        vector_store:
+          type: boolean
+        timestamp:
+          type: string
+          format: date-time
+
+    # ============ Error ============
+    ErrorResponse:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          description: Error code
+        message:
+          type: string
+          description: Human-readable message
+        details:
+          type: object
+          additionalProperties: true
+
+    # ============ Auth ============
+    UserCreate:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+        display_name:
+          type: string
+          maxLength: 100
+
+    UserLogin:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    UserResponse:
+      type: object
+      required: [id, email, role, is_active, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        display_name:
+          type: string
+          nullable: true
+        role:
+          type: string
+          enum: [student, instructor, admin]
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+          default: bearer
+        expires_in:
+          type: integer
+          description: Access token expiry in seconds
+
+    TokenRefresh:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+
+    # ============ Chat ============
+    ChatQuery:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        selected_text:
+          type: string
+          maxLength: 5000
+          description: Text selected by user for context
+        module_id:
+          type: string
+          description: Filter retrieval to specific module
+        chapter_id:
+          type: string
+          description: Filter retrieval to specific chapter
+        session_id:
+          type: string
+          format: uuid
+          description: Continue existing session
+        chat_history:
+          type: array
+          items:
+            type: object
+            properties:
+              role:
+                type: string
+                enum: [user, assistant]
+              content:
+                type: string
+
+    ChatResponse:
+      type: object
+      required: [answer, sources, session_id]
+      properties:
+        answer:
+          type: string
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatSource'
+        session_id:
+          type: string
+          format: uuid
+
+    ChatSource:
+      type: object
+      required: [module_id, chapter_id, section, score]
+      properties:
+        module_id:
+          type: string
+        chapter_id:
+          type: string
+        section:
+          type: string
+        score:
+          type: number
+          format: float
+
+    ChatSessionSummary:
+      type: object
+      required: [id, message_count, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          nullable: true
+        message_count:
+          type: integer
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ChatSessionDetail:
+      type: object
+      required: [id, messages]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          nullable: true
+        initial_context:
+          type: object
+          nullable: true
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+
+    ChatMessage:
+      type: object
+      required: [id, sequence_number, role, content, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        sequence_number:
+          type: integer
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+        retrieved_chunks:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/ChatSource'
+        selection_context:
+          type: object
+          nullable: true
+          properties:
+            selected_text:
+              type: string
+            chapter_id:
+              type: string
+        feedback_rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    MessageFeedback:
+      type: object
+      required: [rating]
+      properties:
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        feedback_text:
+          type: string
+          maxLength: 1000
+
+    # ============ Progress ============
+    ProgressUpdate:
+      type: object
+      required: [content_type, progress_percent]
+      properties:
+        content_type:
+          type: string
+          enum: [module, chapter, exercise]
+        progress_percent:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+        scroll_position:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        reading_time_delta:
+          type: integer
+          minimum: 0
+          description: Seconds to add to reading time
+
+    ProgressResponse:
+      type: object
+      required: [id, content_id, content_type, status, progress_percent]
+      properties:
+        id:
+          type: string
+          format: uuid
+        content_id:
+          type: string
+        content_type:
+          type: string
+          enum: [module, chapter, exercise]
+        status:
+          type: string
+          enum: [not_started, in_progress, completed]
+        progress_percent:
+          type: number
+          format: float
+        scroll_position:
+          type: number
+          format: float
+          nullable: true
+        reading_time_seconds:
+          type: integer
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ProgressSummary:
+      type: object
+      required: [user_id, modules_started, modules_completed, chapters_completed, exercises_completed, total_reading_time_seconds]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        modules_started:
+          type: integer
+        modules_completed:
+          type: integer
+        chapters_completed:
+          type: integer
+        exercises_completed:
+          type: integer
+        total_reading_time_seconds:
+          type: integer
+        last_content_id:
+          type: string
+          nullable: true
+        last_accessed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ResumePosition:
+      type: object
+      required: [content_id, content_type, progress_percent]
+      properties:
+        content_id:
+          type: string
+        content_type:
+          type: string
+        progress_percent:
+          type: number
+          format: float
+        scroll_position:
+          type: number
+          format: float
+          nullable: true
+
+    ModuleProgressResponse:
+      type: object
+      required: [module_id, total_chapters, completed_chapters, total_exercises, completed_exercises, overall_progress]
+      properties:
+        module_id:
+          type: string
+        total_chapters:
+          type: integer
+        completed_chapters:
+          type: integer
+        total_exercises:
+          type: integer
+        completed_exercises:
+          type: integer
+        overall_progress:
+          type: number
+          format: float
+        first_accessed_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true

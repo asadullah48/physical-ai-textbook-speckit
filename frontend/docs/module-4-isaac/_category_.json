@@ -1,0 +1,13 @@
+{
+  "label": "Module 4: NVIDIA Isaac Platform",
+  "position": 5,
+  "link": {
+    "type": "generated-index",
+    "description": "Isaac Sim, Isaac ROS with VSLAM, and Nav2 path planning for bipedal locomotion. Covers weeks 8-10 of the 13-week course."
+  },
+  "customProps": {
+    "weeks": "8-10",
+    "estimatedHours": 12,
+    "difficulty": "advanced"
+  }
+}

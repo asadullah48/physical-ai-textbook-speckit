@@ -1,0 +1,248 @@
+---
+sidebar_position: 3
+title: Embodied Intelligence
+description: Understanding intelligence through physical interaction
+keywords: [embodied-intelligence, cognition, sensorimotor, learning]
+# Instructor metadata (T075)
+week: 2
+estimated_time: 40
+difficulty: intermediate
+learning_objectives:
+  - Explain the concept of embodied cognition
+  - Describe how physical interaction shapes learning
+  - Understand the sensorimotor loop
+  - Compare embodied and disembodied AI approaches
+prerequisites:
+  - module-1-intro/01-what-is-physical-ai
+  - module-1-intro/02-sensor-systems
+---
+
+# Embodied Intelligence
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Explain the concept of embodied cognition
+2. Describe how physical interaction shapes learning
+3. Understand the sensorimotor loop
+4. Compare embodied and disembodied AI approaches
+
+---
+
+## Introduction
+
+**Embodied intelligence** is the principle that cognitive processes are deeply rooted in the body's physical interactions with the world. This challenges the traditional view of the mind as a computer that simply processes abstract symbols.
+
+:::info The Embodiment Thesis
+Intelligence cannot be fully understood without reference to the physical body that houses it and the environment in which it operates.
+:::
+
+## The Sensorimotor Loop
+
+At the heart of embodied intelligence is the **sensorimotor loop**:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  Sensorimotor Loop                       │
+│                                                          │
+│    ┌──────────┐                      ┌──────────┐       │
+│    │  Senses  │  ────Perception───>  │  Brain   │       │
+│    │          │                      │          │       │
+│    │  Eyes    │                      │ Process  │       │
+│    │  Touch   │                      │ Decide   │       │
+│    │  Sound   │                      │ Learn    │       │
+│    └────▲─────┘                      └────┬─────┘       │
+│         │                                  │            │
+│         │                                  │            │
+│    ┌────┴──────────────────────────────────▼────┐       │
+│    │                Environment                  │       │
+│    │                                             │       │
+│    │         <────Action/Movement────            │       │
+│    └─────────────────────────────────────────────┘       │
+└─────────────────────────────────────────────────────────┘
+```
+
+This loop operates continuously:
+
+1. **Sense**: Gather information from the environment
+2. **Process**: Interpret sensory data and make decisions
+3. **Act**: Execute physical movements
+4. **Observe**: Sense the results of actions
+5. **Learn**: Update internal models based on outcomes
+
+## Implementation: A Simple Sensorimotor Agent
+
+```python
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any, Dict
+import numpy as np
+
+@dataclass
+class Observation:
+    """Sensory observation from the environment."""
+    visual: np.ndarray       # Camera image
+    proprioception: Dict[str, float]  # Joint positions
+    tactile: np.ndarray      # Touch sensors
+    timestamp: float
+
+@dataclass
+class Action:
+    """Motor command to execute."""
+    joint_velocities: Dict[str, float]
+    gripper_position: float
+
+class EmbodiedAgent(ABC):
+    """Base class for embodied intelligent agents."""
+
+    def __init__(self):
+        self.internal_state: Dict[str, Any] = {}
+        self.memory: list = []
+
+    @abstractmethod
+    def perceive(self, observation: Observation) -> Dict[str, Any]:
+        """Process sensory input into internal representation."""
+        pass
+
+    @abstractmethod
+    def decide(self, perception: Dict[str, Any]) -> Action:
+        """Decide on an action based on perception."""
+        pass
+
+    @abstractmethod
+    def learn(self, observation: Observation, action: Action,
+              result: Observation) -> None:
+        """Learn from the outcome of an action."""
+        pass
+
+    def step(self, observation: Observation) -> Action:
+        """Execute one sensorimotor cycle."""
+        # Perceive
+        perception = self.perceive(observation)
+
+        # Decide
+        action = self.decide(perception)
+
+        # Store for learning (result comes in next step)
+        self.memory.append({
+            "observation": observation,
+            "action": action
+        })
+
+        return action
+```
+
+## Active Perception
+
+Embodied agents don't passively receive information—they actively seek it out:
+
+```python
+class ActivePerceptionAgent(EmbodiedAgent):
+    """Agent that actively gathers information."""
+
+    def __init__(self, curiosity_weight: float = 0.3):
+        super().__init__()
+        self.curiosity_weight = curiosity_weight
+        self.visited_regions = set()
+
+    def compute_information_gain(self, position: tuple) -> float:
+        """Estimate information gain from moving to a position."""
+        # Higher gain for unexplored regions
+        if position in self.visited_regions:
+            return 0.1  # Low gain for known areas
+        return 1.0  # High gain for unknown areas
+
+    def decide(self, perception: Dict[str, Any]) -> Action:
+        """Balance task completion with exploration."""
+        task_action = self._compute_task_action(perception)
+        explore_action = self._compute_explore_action(perception)
+
+        # Weight between task and exploration
+        if np.random.random() < self.curiosity_weight:
+            return explore_action
+        return task_action
+
+    def _compute_task_action(self, perception: Dict[str, Any]) -> Action:
+        """Compute action for main task."""
+        # Placeholder - would use task-specific logic
+        return Action(joint_velocities={}, gripper_position=0.0)
+
+    def _compute_explore_action(self, perception: Dict[str, Any]) -> Action:
+        """Compute action to explore unknown areas."""
+        # Placeholder - would move toward high information gain
+        return Action(joint_velocities={}, gripper_position=0.0)
+```
+
+## Morphological Computation
+
+The physical body itself performs computation:
+
+:::tip Example: The Passive Walker
+A well-designed bipedal mechanism can walk down a slope using only gravity—no motors or control needed. The body's shape and dynamics "compute" the walking motion.
+:::
+
+```python
+class MorphologicalComputation:
+    """
+    Demonstrates how physical properties affect computation.
+
+    The body's design can simplify control by:
+    1. Mechanical compliance (springs, dampers)
+    2. Geometric constraints (joint limits)
+    3. Material properties (grip, flexibility)
+    """
+
+    @staticmethod
+    def spring_damper_dynamics(
+        position: float,
+        velocity: float,
+        spring_k: float,
+        damping_c: float,
+        rest_position: float = 0.0
+    ) -> float:
+        """
+        Compute force from a spring-damper system.
+
+        This passive mechanical element provides automatic
+        disturbance rejection without explicit control.
+        """
+        spring_force = -spring_k * (position - rest_position)
+        damping_force = -damping_c * velocity
+        return spring_force + damping_force
+```
+
+## Comparison: Embodied vs Disembodied AI
+
+| Aspect | Disembodied AI | Embodied AI |
+|--------|----------------|-------------|
+| **Learning** | From curated datasets | From physical interaction |
+| **Feedback** | Delayed/batch | Immediate/continuous |
+| **Grounding** | Symbolic/abstract | Physical/sensory |
+| **Generalization** | Within training distribution | Through physical intuition |
+| **Safety** | Software errors | Physical consequences |
+
+## Summary
+
+- Embodied intelligence emphasizes the role of physical interaction in cognition
+- The sensorimotor loop is the fundamental cycle of perception-action-learning
+- Active perception means agents seek information, not just receive it
+- Morphological computation leverages body design to simplify control
+
+---
+
+## Exercises
+
+### Easy
+
+1. Define the sensorimotor loop in your own words.
+2. Give an example of morphological computation from everyday life.
+
+### Medium
+
+3. Extend the `EmbodiedAgent` class to include a simple memory system that stores recent observations.
+4. Implement a `perceive` method that extracts features from visual input.
+
+### Challenging
+
+5. Design an embodied learning algorithm where a robot learns to grasp objects by trying different grip strategies. Describe the observation space, action space, and reward function.

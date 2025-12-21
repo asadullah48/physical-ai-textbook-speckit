@@ -1,0 +1,286 @@
+---
+sidebar_position: 4
+title: Humanoid Robot Advantages
+description: Why humanoid form factors are important for Physical AI
+keywords: [humanoid, bipedal, anthropomorphic, robot-design]
+# Instructor metadata (T075)
+week: 2
+estimated_time: 35
+difficulty: beginner
+learning_objectives:
+  - Explain why humanoid robots are designed to resemble humans
+  - Describe the advantages of bipedal locomotion
+  - Understand the role of anthropomorphic manipulation
+  - Discuss social and practical benefits of humanoid form
+prerequisites:
+  - module-1-intro/01-what-is-physical-ai
+  - module-1-intro/03-embodied-intelligence
+---
+
+# Humanoid Robot Advantages
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Explain why humanoid robots are designed to resemble humans
+2. Describe the advantages of bipedal locomotion
+3. Understand the role of anthropomorphic manipulation
+4. Discuss social and practical benefits of humanoid form
+
+---
+
+## Introduction
+
+Humanoid robots are designed with human-like features: two arms, two legs, a torso, and a head. While this might seem like an obvious choice, there are deep practical and theoretical reasons for this design.
+
+## The Human Environment Argument
+
+Our built environment is optimized for human bodies:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│           Human-Designed Environment Features            │
+├─────────────────────────────────────────────────────────┤
+│                                                          │
+│  Stairs: 17-18cm rise, 27-30cm tread                    │
+│  ├── Optimized for human leg length                     │
+│  └── Requires bipedal climbing ability                   │
+│                                                          │
+│  Doorways: 80-90cm wide, 200cm tall                     │
+│  ├── Sized for human body dimensions                     │
+│  └── Handle height: 90-100cm (arm reach)                │
+│                                                          │
+│  Furniture: Designed for sitting humans                  │
+│  ├── Chair height: 45cm (knee level)                    │
+│  └── Table height: 75cm (elbow level)                   │
+│                                                          │
+│  Tools: Designed for human hands                         │
+│  ├── Grip diameter: 3-4cm                               │
+│  └── Trigger/button placement for fingers               │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+A humanoid robot can navigate this environment without modifications:
+
+```python
+from dataclasses import dataclass
+from enum import Enum
+from typing import List
+
+class EnvironmentFeature(Enum):
+    STAIRS = "stairs"
+    DOOR = "door"
+    ELEVATOR_BUTTON = "elevator_button"
+    CHAIR = "chair"
+    TOOL = "tool"
+
+@dataclass
+class HumanoidCapability:
+    """Capabilities of a humanoid robot."""
+    height_cm: float
+    arm_reach_cm: float
+    hand_grip_width_cm: float
+    step_height_max_cm: float
+
+    def can_interact_with(self, feature: EnvironmentFeature) -> bool:
+        """Check if humanoid can interact with environment feature."""
+        requirements = {
+            EnvironmentFeature.STAIRS: self.step_height_max_cm >= 18,
+            EnvironmentFeature.DOOR: self.arm_reach_cm >= 50,
+            EnvironmentFeature.ELEVATOR_BUTTON: self.arm_reach_cm >= 80,
+            EnvironmentFeature.CHAIR: self.height_cm >= 100,
+            EnvironmentFeature.TOOL: 2.5 <= self.hand_grip_width_cm <= 5.0,
+        }
+        return requirements.get(feature, True)
+
+# Example: Tesla Optimus-like specifications
+optimus = HumanoidCapability(
+    height_cm=173,
+    arm_reach_cm=60,
+    hand_grip_width_cm=4.0,
+    step_height_max_cm=20
+)
+
+# Check capabilities
+for feature in EnvironmentFeature:
+    can_do = optimus.can_interact_with(feature)
+    print(f"{feature.value}: {'✓' if can_do else '✗'}")
+```
+
+## Bipedal Locomotion
+
+### Advantages
+
+Bipedal walking offers unique advantages:
+
+```python
+from dataclasses import dataclass
+from typing import Tuple
+
+@dataclass
+class BipedalGait:
+    """Represents a bipedal walking gait."""
+    step_length_m: float
+    step_height_m: float
+    cycle_time_s: float
+
+    @property
+    def walking_speed(self) -> float:
+        """Calculate walking speed in m/s."""
+        return (2 * self.step_length_m) / self.cycle_time_s
+
+    def can_traverse(self, obstacle_height: float,
+                     gap_width: float) -> Tuple[bool, str]:
+        """Check if gait can traverse an obstacle."""
+        if obstacle_height > self.step_height_m:
+            return False, f"Obstacle too high: {obstacle_height}m > {self.step_height_m}m"
+        if gap_width > self.step_length_m:
+            return False, f"Gap too wide: {gap_width}m > {self.step_length_m}m"
+        return True, "Can traverse"
+
+# Human-like gait parameters
+human_gait = BipedalGait(
+    step_length_m=0.7,
+    step_height_m=0.25,
+    cycle_time_s=1.0
+)
+
+print(f"Walking speed: {human_gait.walking_speed:.2f} m/s")
+print(human_gait.can_traverse(0.15, 0.5))  # Curb and small gap
+```
+
+### Challenges
+
+Bipedal locomotion is inherently unstable:
+
+```python
+import numpy as np
+
+class BalanceController:
+    """Simple inverted pendulum balance controller."""
+
+    def __init__(self, mass: float, height: float):
+        self.mass = mass
+        self.height = height
+        self.gravity = 9.81
+
+        # State: [position, velocity, angle, angular_velocity]
+        self.state = np.zeros(4)
+
+    def compute_zmp(self, com_position: np.ndarray,
+                    com_acceleration: np.ndarray) -> np.ndarray:
+        """
+        Compute Zero Moment Point (ZMP).
+
+        The ZMP is where the ground reaction force must act
+        to maintain balance. If ZMP is outside the support
+        polygon, the robot will fall.
+        """
+        zmp_x = com_position[0] - (com_position[2] / self.gravity) * com_acceleration[0]
+        zmp_y = com_position[1] - (com_position[2] / self.gravity) * com_acceleration[1]
+        return np.array([zmp_x, zmp_y])
+
+    def is_stable(self, zmp: np.ndarray, support_polygon: np.ndarray) -> bool:
+        """Check if ZMP is within support polygon."""
+        # Simplified: check if within bounding box
+        min_x, max_x = support_polygon[:, 0].min(), support_polygon[:, 0].max()
+        min_y, max_y = support_polygon[:, 1].min(), support_polygon[:, 1].max()
+
+        return (min_x <= zmp[0] <= max_x) and (min_y <= zmp[1] <= max_y)
+```
+
+## Anthropomorphic Manipulation
+
+Human-like hands enable use of human tools:
+
+```python
+from dataclasses import dataclass
+from typing import List, Optional
+from enum import Enum
+
+class GripType(Enum):
+    POWER = "power"      # Full hand grip
+    PRECISION = "precision"  # Fingertip grip
+    LATERAL = "lateral"   # Side pinch
+    HOOK = "hook"        # Finger hook
+
+@dataclass
+class AnthropomorphicHand:
+    """Model of a human-like robot hand."""
+    num_fingers: int = 5
+    thumb_opposition: bool = True
+    finger_segments: int = 3
+
+    def available_grips(self) -> List[GripType]:
+        """Return grip types available with this hand design."""
+        grips = [GripType.HOOK]  # Always available
+
+        if self.num_fingers >= 4:
+            grips.append(GripType.POWER)
+
+        if self.thumb_opposition:
+            grips.append(GripType.PRECISION)
+            grips.append(GripType.LATERAL)
+
+        return grips
+
+    def select_grip_for_object(self, object_diameter_cm: float,
+                                object_weight_kg: float) -> Optional[GripType]:
+        """Select appropriate grip for an object."""
+        if object_weight_kg > 2.0:
+            return GripType.POWER
+        elif object_diameter_cm < 2.0:
+            return GripType.PRECISION
+        elif object_diameter_cm < 5.0:
+            return GripType.LATERAL
+        else:
+            return GripType.POWER
+
+# Example usage
+hand = AnthropomorphicHand()
+print(f"Available grips: {[g.value for g in hand.available_grips()]}")
+print(f"Grip for screwdriver: {hand.select_grip_for_object(2.5, 0.1)}")
+print(f"Grip for heavy box: {hand.select_grip_for_object(30, 5.0)}")
+```
+
+## Social Interaction
+
+Humanoid form facilitates natural social interaction:
+
+| Feature | Social Benefit |
+|---------|----------------|
+| **Face** | Expression of emotions, gaze direction |
+| **Height** | Eye-level conversation |
+| **Gestures** | Non-verbal communication |
+| **Posture** | Indicates attention, intention |
+
+## Summary
+
+Humanoid robots offer advantages in:
+
+- **Environment compatibility**: Navigate spaces designed for humans
+- **Tool use**: Operate human-designed equipment
+- **Locomotion**: Access stairs, uneven terrain
+- **Social interaction**: Natural communication with humans
+
+The humanoid form is not about mimicking humans for its own sake—it's about practical compatibility with human environments and tools.
+
+---
+
+## Exercises
+
+### Easy
+
+1. List three human-designed objects that require a humanoid form to use.
+2. What is the Zero Moment Point (ZMP) and why is it important?
+
+### Medium
+
+3. Extend the `HumanoidCapability` class to include more environment features.
+4. Implement a simple grip strength model for the `AnthropomorphicHand`.
+
+### Challenging
+
+5. Design a comparison experiment between a wheeled robot and a humanoid robot for household tasks. What metrics would you use? What environments would favor each design?

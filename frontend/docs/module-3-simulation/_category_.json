@@ -1,0 +1,13 @@
+{
+  "label": "Module 3: Simulation Environments",
+  "position": 4,
+  "link": {
+    "type": "generated-index",
+    "description": "Gazebo physics simulation, Unity rendering, and sensor simulation for safe robot development. Covers weeks 6-7 of the 13-week course."
+  },
+  "customProps": {
+    "weeks": "6-7",
+    "estimatedHours": 8,
+    "difficulty": "intermediate"
+  }
+}

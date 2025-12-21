@@ -1,0 +1,13 @@
+{
+  "label": "Module 5: Vision-Language-Action Systems",
+  "position": 6,
+  "link": {
+    "type": "generated-index",
+    "description": "Voice-to-action pipelines, LLM cognitive planning, and capstone project for autonomous humanoid behavior. Covers weeks 11-13 of the 13-week course."
+  },
+  "customProps": {
+    "weeks": "11-13",
+    "estimatedHours": 12,
+    "difficulty": "advanced"
+  }
+}

@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+build/
+.docusaurus/
+dist/
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Cache
+.cache/
+
+# Generated files
+*.min.js
+
+# Static assets
+static/
+
+# Third-party
+vendor/
+
+# Docusaurus generated
+.docusaurus/

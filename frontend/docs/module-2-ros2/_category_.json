@@ -1,0 +1,13 @@
+{
+  "label": "Module 2: ROS 2 Fundamentals",
+  "position": 3,
+  "link": {
+    "type": "generated-index",
+    "description": "Robot Operating System 2 concepts including nodes, topics, services, actions, and URDF for humanoid robots. Covers weeks 3-5 of the 13-week course."
+  },
+  "customProps": {
+    "weeks": "3-5",
+    "estimatedHours": 12,
+    "difficulty": "intermediate"
+  }
+}
