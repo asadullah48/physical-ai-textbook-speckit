@@ -100,7 +100,7 @@ function HomepageHeader(): JSX.Element {
               'button button--secondary button--lg',
               styles.heroButton
             )}
-            to="/docs/module-1-intro/01-what-is-physical-ai"
+            to="/docs/module-1-intro/what-is-physical-ai"
           >
             Module 1: Introduction
           </Link>
