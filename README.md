@@ -1,14 +1,17 @@
-# Physical AI Textbook - Spec-Kit Plus Edition
+# Physical AI & Humanoid Robotics Textbook
 
-Built using Spec-Kit Plus methodology for Panaversity Hackathon.
+**Live Frontend:** https://frontend-ten-delta-35.vercel.app
+**GitHub:** https://github.com/asadullah48/physical-ai-textbook-speckit
 
-## Requirements Met:
-- ✅ Docusaurus textbook
-- ✅ RAG Chatbot with FastAPI
-- ✅ OpenAI Agents/ChatKit SDKs
-- ✅ Neon Postgres + Qdrant Cloud
-- ✅ Deployed to GitHub Pages
+## Features
+- ✅ 5 comprehensive modules
+- ✅ RAG chatbot UI (Gemini AI)
+- ✅ Selection-based Q&A
+- ✅ Progress tracking
+- ✅ FastAPI backend (ready for deployment)
 
-## Development Approach:
-Using Spec-Kit Plus specification-first methodology with Claude Code.
+## Tech Stack
+**Frontend:** Docusaurus, React, TypeScript
+**Backend:** FastAPI, Gemini AI, Qdrant, Neon Postgres
 
+Built with Spec-Kit Plus methodology for Panaversity Hackathon
