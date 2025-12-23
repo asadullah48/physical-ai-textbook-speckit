@@ -183,13 +183,13 @@ A returning student wants to continue learning from where they left off in a pre
 - **SC-004**: Students can locate any topic within 3 clicks from the homepage
 
 **Chatbot Effectiveness**
-- **SC-005**: Chatbot provides relevant, accurate answers for 90% of questions about textbook content
-- **SC-006**: Chatbot response time is under 5 seconds for standard queries
-- **SC-007**: Selection-based Q&A successfully uses selected text as context in 95% of interactions
+- **SC-005**: Chatbot provides relevant, accurate answers for 90% of questions about textbook content. Measurement: User feedback thumbs-up/thumbs-down rating on responses, sampled monthly with target ≥90% positive
+- **SC-006**: Chatbot response time is under 5 seconds for queries up to 200 characters. Measurement: P95 latency tracked via backend logging
+- **SC-007**: Selection-based Q&A successfully uses selected text as context in 95% of interactions. Measurement: Response includes direct reference or quote from selected text, verified by string matching in CI tests
 
 **User Experience**
 - **SC-008**: Users can access the textbook from mobile and desktop browsers without functionality loss
-- **SC-009**: Page load time is under 3 seconds on standard broadband connections
+- **SC-009**: Page load time is under 3 seconds on connections ≥10 Mbps download speed
 - **SC-010**: Users can create an account and begin learning within 2 minutes of first visit
 
 **Learning Outcomes**

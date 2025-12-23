@@ -192,8 +192,8 @@
 
 ### Exercise Progress Tracking
 
-- [ ] T073 [US4] Add exercise attempts tracking to UserProgress model in backend/src/models/progress.py
-- [ ] T074 [US4] Add exercises to progress schemas in backend/src/models/schemas.py
+- [x] T073 [US4] Add exercise attempts tracking to UserProgress model in backend/src/models/progress.py
+- [x] T074 [US4] Add exercises to progress schemas in backend/src/models/schemas.py
 
 **Checkpoint**: User Story 4 complete - Exercise framework in place for content authors
 
