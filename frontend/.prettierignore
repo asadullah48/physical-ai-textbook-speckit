@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+build/
+.docusaurus/
+dist/
+
+# Lock files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Cache
+.cache/
+
+# Generated files
+*.min.js
+*.min.css
+
+# Docusaurus generated
+.docusaurus/
+
+# Static assets (images, fonts)
+static/img/
+static/fonts/
