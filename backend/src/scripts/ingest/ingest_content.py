@@ -82,8 +82,9 @@ async def ingest_content(
         return stats
 
     # Initialize services
-    embeddings_service = EmbeddingsService(settings)
-    qdrant_client = await get_qdrant_client()
+    settings = get_settings()
+    embeddings_service = EmbeddingsService(settings.google_api_key)
+    qdrant_client = get_qdrant_client()
 
     # Ensure collection exists
     try:
