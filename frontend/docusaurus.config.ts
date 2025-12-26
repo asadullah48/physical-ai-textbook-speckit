@@ -8,6 +8,9 @@ const config: Config = {
   favicon: 'img/favicon.ico',
   url: 'https://asadullah48.github.io',
   baseUrl: '/physical-ai-textbook-speckit/',
+  customFields: {
+    apiUrl: 'https://asadullahshafique-physical-ai-backend.hf.space',
+  },
   organizationName: 'asadullah48',
   projectName: 'physical-ai-textbook-speckit',
   onBrokenLinks: 'throw',

@@ -7,12 +7,7 @@ import type { ChatSource } from '@site/src/context/ChatContext';
 
 // Get API URL
 const getApiUrl = (): string => {
-  if (typeof window !== 'undefined') {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const docusaurusConfig = (window as any).docusaurus;
-    return docusaurusConfig?.siteConfig?.customFields?.apiUrl || 'http://localhost:8000';
-  }
-  return process.env.DOCUSAURUS_API_URL || 'http://localhost:8000';
+  return 'https://asadullahshafique-physical-ai-backend.hf.space';
 };
 
 export interface StreamingChatOptions {

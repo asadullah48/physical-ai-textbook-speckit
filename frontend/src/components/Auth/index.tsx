@@ -35,7 +35,7 @@ export function AuthModal({ onSuccess, onClose }: AuthProps): JSX.Element {
         ? { email: formData.email, password: formData.password }
         : formData;
 
-      const apiUrl = process.env.DOCUSAURUS_API_URL || 'http://localhost:8000';
+      const apiUrl = "https://asadullahshafique-physical-ai-backend.hf.space";
       const response = await fetch(`${apiUrl}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

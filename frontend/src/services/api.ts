@@ -4,14 +4,7 @@
 
 // Get API URL from Docusaurus config or environment
 const getApiUrl = (): string => {
-  if (typeof window !== 'undefined') {
-    // Client-side: use window config
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const docusaurusConfig = (window as any).docusaurus;
-    return docusaurusConfig?.siteConfig?.customFields?.apiUrl || 'http://localhost:8000';
-  }
-  // Server-side: use environment variable
-  return process.env.DOCUSAURUS_API_URL || 'http://localhost:8000';
+  return 'https://asadullahshafique-physical-ai-backend.hf.space';
 };
 
 /**

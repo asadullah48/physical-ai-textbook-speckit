@@ -46,7 +46,7 @@ interface UseProgressReturn {
 }
 
 const STORAGE_KEY = 'physical_ai_progress';
-const API_URL = process.env.DOCUSAURUS_API_URL || 'http://localhost:8000';
+const API_URL = "https://asadullahshafique-physical-ai-backend.hf.space";
 
 /**
  * Helper to get auth headers if user is authenticated.
