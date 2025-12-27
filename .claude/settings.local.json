@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "SlashCommand(/sp.specify)",
+      "Bash(git fetch:*)",
+      "Bash(ls:*)",
+      "Bash(.specify/scripts/bash/create-new-feature.sh:*)",
+      "Skill(sp.plan)",
+      "Bash(.specify/scripts/bash/setup-plan.sh:*)",
+      "Bash(.specify/scripts/bash/update-agent-context.sh:*)",
+      "Bash(.specify/scripts/bash/create-phr.sh:*)",
+      "Bash(.specify/scripts/bash/check-prerequisites.sh --json)",
+      "Bash(.specify/scripts/bash/check-prerequisites.sh:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(cat:*)",
+      "Bash(chmod:*)",
+      "Bash(find:*)",
+      "Bash(git add .gitignore CLAUDE.md backend/ frontend/ history/ scripts/ specs/)",
+      "Bash(/mnt/d/physical-ai-textbook-speckit/.specify/scripts/bash/check-prerequisites.sh:*)",
+      "Bash(mkdir:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\ndocs\\(spec\\): add measurable criteria to success metrics\n\nUpdate success criteria SC-005, SC-006, SC-007, and SC-009 with specific\nmeasurement methods and thresholds. Mark T073 and T074 as complete\n\\(exercise tracking was already implemented\\). Add PHR documenting the\ncross-artifact consistency analysis.\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(gh pr create --title \"docs\\(spec\\): add measurable criteria to success metrics\" --body \"$\\(cat <<''EOF''\n## Summary\n\n- Updated success criteria \\(SC-005, SC-006, SC-007, SC-009\\) with specific measurement methods and thresholds for testability\n- Marked T073 and T074 as complete \\(exercise progress tracking was already implemented\\)\n- Added PHR documenting the cross-artifact consistency analysis performed\n\n## Changes\n\n- **spec.md**: Added measurement methodology to 4 success criteria:\n  - SC-005: User feedback sampling with ≥90% positive target\n  - SC-006: P95 latency tracking for queries up to 200 chars\n  - SC-007: String matching verification in CI tests\n  - SC-009: Bandwidth threshold clarified \\(≥10 Mbps\\)\n\n- **tasks.md**: Updated T073/T074 status to complete\n\n- **PHR**: Added analysis record documenting findings and remediation\n\n## Test plan\n\n- [ ] Verify spec.md renders correctly\n- [ ] Confirm task status updates are accurate\n- [ ] Review PHR follows template structure\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\nEOF\n\\)\")"
+    ]
+  }
+}

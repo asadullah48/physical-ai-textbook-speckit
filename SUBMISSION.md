@@ -31,7 +31,7 @@ An interactive educational platform for learning Physical AI, ROS 2, and Humanoi
 - Responsive design with mobile support
 
 ## 📹 Demo Video
-[YouTube link - to be added after recording]
+**YouTube Demo:** https://youtu.be/WnOs5pMCyqc
 
 ## 🚀 Built With
 Spec-Kit Plus methodology - Specification-first development approach
