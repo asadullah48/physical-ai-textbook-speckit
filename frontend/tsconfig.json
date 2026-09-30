@@ -3,7 +3,9 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": {
-      "@site/*": ["./*"]
+      "@site/*": [
+        "./*"
+      ]
     },
     "strict": true,
     "noUnusedLocals": true,
@@ -15,8 +17,21 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    "types": [
+      "@docusaurus/module-type-aliases",
+      "@docusaurus/theme-classic",
+      "jest",
+      "node"
+    ]
   },
-  "include": ["src/**/*", "docs/**/*"],
-  "exclude": ["node_modules", "build", ".docusaurus"]
+  "include": [
+    "src/**/*",
+    "tests/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "build",
+    ".docusaurus"
+  ]
 }

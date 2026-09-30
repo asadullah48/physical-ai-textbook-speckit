@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { useChat } from '@site/src/context/ChatContext';
 import { ChatMessage, TypingIndicator } from './ChatMessage';
 import { ChatInput } from './ChatInput';
@@ -60,8 +60,8 @@ function SelectionBanner() {
     <div className={styles.selectionBanner}>
       <QuoteIcon />
       <div className={styles.selectionText}>
-        "{selectionContext.text.slice(0, 150)}
-        {selectionContext.text.length > 150 ? '...' : ''}"
+        &ldquo;{selectionContext.text.slice(0, 150)}
+        {selectionContext.text.length > 150 ? '...' : ''}&rdquo;
       </div>
       <button
         className={styles.clearSelection}
@@ -77,7 +77,14 @@ function SelectionBanner() {
 /**
  * Empty state when no messages.
  */
+const SUGGESTIONS = [
+  'What is the difference between a ROS 2 service and an action?',
+  'How does domain randomization help sim-to-real transfer?',
+  'How does a VLA model turn language into robot actions?',
+];
+
 function EmptyState() {
+  const { sendMessage } = useChat();
   return (
     <div className={styles.emptyState}>
       <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -88,8 +95,15 @@ function EmptyState() {
       </svg>
       <p>Ask me anything about the textbook!</p>
       <small>
-        I can help explain concepts, answer questions, and guide you through the material.
+        Answers come from the book itself, with a link to every section used. Highlight any text to ask about it.
       </small>
+      <div className={styles.suggestions}>
+        {SUGGESTIONS.map((q) => (
+          <button key={q} type="button" className={styles.suggestion} onClick={() => sendMessage(q)}>
+            {q}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

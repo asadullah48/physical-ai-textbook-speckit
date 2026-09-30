@@ -39,9 +39,15 @@ class Settings(BaseSettings):
 
     # AI (Google Gemini)
     google_api_key: str = Field(..., description="Google Gemini API key")
-    gemini_model: str = Field(default="gemini-1.5-flash", description="Gemini model name")
+    # Gemini model names are retired over time (gemini-1.5-flash and
+    # text-embedding-004 no longer are the current generation); both are
+    # configuration, not code, so a deployment can follow Google's model list.
+    gemini_model: str = Field(default="gemini-2.5-flash", description="Gemini model name")
     embedding_model: str = Field(
-        default="text-embedding-004", description="Embedding model name"
+        default="gemini-embedding-001", description="Embedding model name"
+    )
+    embedding_dimension: int = Field(
+        default=768, description="Vector size; must match the Qdrant collection"
     )
 
     # JWT Authentication

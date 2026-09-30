@@ -1,0 +1,377 @@
+---
+sidebar_position: 2
+title: Isaac Sim and USD
+description: NVIDIA Isaac Sim on Omniverse, Universal Scene Description, and standalone Python simulation workflows
+keywords: [isaac-sim, omniverse, usd, openusd, simulation, articulation, nvidia]
+# Instructor metadata (T075)
+week: 8
+estimated_time: 75
+difficulty: advanced
+learning_objectives:
+  - Describe the architecture of Isaac Sim and its relationship to NVIDIA Omniverse
+  - Explain the core USD concepts of stage, prims, layers, references, and variants
+  - Author and modify USD scenes programmatically with the pxr Python API
+  - Run a standalone Isaac Sim Python script that loads and controls an articulated robot
+prerequisites:
+  - module-3-simulation/index
+---
+
+# Isaac Sim and Universal Scene Description
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Describe the architecture of Isaac Sim and its relationship to NVIDIA Omniverse
+2. Explain the core USD concepts of stage, prims, layers, references, and variants
+3. Author and modify USD scenes programmatically with the `pxr` Python API
+4. Run a standalone Isaac Sim Python script that loads and controls an articulated robot
+
+---
+
+## Introduction
+
+In Module 3 you simulated robots in Gazebo. Gazebo is an excellent general-purpose simulator, but humanoid development increasingly relies on three things it was not primarily built for: **photorealistic rendering** for training perception models, **GPU-parallel physics** for reinforcement learning, and **large, composable scenes** that many engineers edit at once.
+
+**NVIDIA Isaac Sim** targets exactly these needs. It is a robotics simulator built on **NVIDIA Omniverse**, and every scene it loads is described in **Universal Scene Description (USD)**, the open scene format originally developed by Pixar. Learning Isaac Sim is therefore really two skills: understanding USD as a data model, and understanding Isaac Sim's Python APIs for physics, sensors, and robots.
+
+:::caution Version assumption for this module
+This chapter targets **Isaac Sim 4.x (4.0 to 4.2)** and its `omni.isaac.core` Python API. Isaac Sim is a fast-moving product: APIs, asset paths, and installation methods change between releases. Always check the official Isaac Sim documentation for the release you have installed.
+:::
+
+:::note The 4.5 module rename
+Starting with **Isaac Sim 4.5**, most Python modules were renamed. For example, `omni.isaac.core` became `isaacsim.core.api`, `omni.isaac.kit.SimulationApp` became `isaacsim.SimulationApp`, and the ROS 2 bridge extension `omni.isaac.ros2_bridge` became `isaacsim.ros2.bridge`. The concepts in this chapter are unchanged; only the import paths differ. If you use 4.5 or newer, consult the release's migration guide and adjust the imports.
+:::
+
+## Isaac Sim Architecture
+
+Isaac Sim is an **Omniverse Kit application**. Kit is a plugin-based runtime in which nearly every feature ships as an *extension*. Isaac Sim is a curated bundle of those extensions plus robotics-specific ones.
+
+```text
+┌────────────────────────────────────────────────────────────────┐
+│                        Isaac Sim (Kit app)                      │
+├────────────────────────────────────────────────────────────────┤
+│  Robotics extensions                                            │
+│  ┌─────────────┐ ┌──────────────┐ ┌─────────────┐ ┌──────────┐ │
+│  │ Core API    │ │ Sensors      │ │ ROS 2 bridge│ │Replicator│ │
+│  │ (World,     │ │ (camera,     │ │ (OmniGraph  │ │(synthetic│ │
+│  │ articulation│ │  lidar, IMU) │ │  nodes)     │ │  data)   │ │
+│  └─────────────┘ └──────────────┘ └─────────────┘ └──────────┘ │
+├────────────────────────────────────────────────────────────────┤
+│  Omniverse Kit runtime: extension manager, OmniGraph, UI       │
+├───────────────────────┬──────────────────┬─────────────────────┤
+│  USD stage (OpenUSD)  │  PhysX (physics) │  RTX renderer       │
+└───────────────────────┴──────────────────┴─────────────────────┘
+```
+
+| Layer | Responsibility |
+|-------|----------------|
+| **USD stage** | Holds the entire scene: geometry, materials, physics properties, robots, sensors |
+| **PhysX** | Rigid body, articulation, and contact simulation, with GPU acceleration available |
+| **RTX renderer** | Ray-traced and path-traced rendering for cameras and RTX-based lidar |
+| **OmniGraph** | Visual and scriptable dataflow graphs, used heavily for ROS 2 publishing |
+| **Core API** | Pythonic wrappers (`World`, `Articulation`, `XFormPrim`) around USD and PhysX |
+
+### Hardware and Installation
+
+Isaac Sim requires an **NVIDIA RTX-class GPU** with a recent driver, plenty of system memory, and fast storage. Exact minimum and recommended specifications change with every release, so **check NVIDIA's current Isaac Sim requirements page** before buying or provisioning hardware. Cloud GPU instances are a practical alternative when local hardware is insufficient.
+
+In the 4.x series there are two common ways to install:
+
+- **Workstation install**: download the packaged release and run scripts with the bundled `python.sh` (Linux) or `python.bat` (Windows).
+- **pip install**: install the `isaacsim` packages from NVIDIA's package index into a Python environment that matches the release's required Python version.
+
+## USD Fundamentals
+
+USD is best understood as a **layered, non-destructive database of scene description**. Five concepts matter most.
+
+| Concept | What it is | Robotics example |
+|---------|-----------|------------------|
+| **Stage** | The composed view of the scene you are working with | The full warehouse with robot, shelves, and lights |
+| **Prim** | A named node in the scene hierarchy, addressed by a path | `/World/H1/pelvis` |
+| **Attribute** | A typed, possibly time-sampled value on a prim | A joint's drive stiffness, a mesh's points |
+| **Layer** | A file (`.usd`, `.usda`, `.usdc`) contributing opinions to the stage | `lighting.usda` owned by one engineer |
+| **Reference** | Pulls another file's prim hierarchy into this stage | Inserting `h1.usd` under `/World/H1` |
+| **Variant set** | Named alternatives on a prim, one selected at a time | Gripper variant: `parallel` or `suction` |
+
+**Composition** is the rule system that merges layers, references, and variants into the final stage. Stronger layers override weaker ones, which lets a tester change a robot's mass in their own layer without touching the original robot file.
+
+### Creating a Stage with `pxr`
+
+The `pxr` module is USD's Python API. It is available inside Isaac Sim's Python environment and also via the standalone `usd-core` package on PyPI, so you can practice these examples without a GPU.
+
+```python
+from pxr import Usd, UsdGeom, UsdPhysics, Gf, Sdf
+
+# Create a new stage backed by a human-readable .usda file
+stage = Usd.Stage.CreateNew("warehouse.usda")
+UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)   # Isaac Sim uses Z-up
+UsdGeom.SetStageMetersPerUnit(stage, 1.0)         # 1 unit = 1 meter
+
+# Root transform, set as the default prim so references can target it
+world = UsdGeom.Xform.Define(stage, "/World")
+stage.SetDefaultPrim(world.GetPrim())
+
+# A static shelf: a cube scaled into a box, with a collider
+shelf = UsdGeom.Cube.Define(stage, "/World/Shelf")
+shelf.GetSizeAttr().Set(1.0)
+xform = UsdGeom.XformCommonAPI(shelf)
+xform.SetTranslate(Gf.Vec3d(2.0, 0.0, 1.0))
+xform.SetScale(Gf.Vec3f(0.5, 2.0, 2.0))
+UsdPhysics.CollisionAPI.Apply(shelf.GetPrim())
+
+# A dynamic box the robot might pick up: collider + rigid body + mass
+box = UsdGeom.Cube.Define(stage, "/World/Box")
+box.GetSizeAttr().Set(0.3)
+UsdGeom.XformCommonAPI(box).SetTranslate(Gf.Vec3d(1.0, 0.5, 0.15))
+UsdPhysics.CollisionAPI.Apply(box.GetPrim())
+UsdPhysics.RigidBodyAPI.Apply(box.GetPrim())
+UsdPhysics.MassAPI.Apply(box.GetPrim()).CreateMassAttr(2.0)
+
+# A custom attribute for downstream tools (e.g. a task label)
+box.GetPrim().CreateAttribute("task:label", Sdf.ValueTypeNames.String).Set("pick_target")
+
+stage.GetRootLayer().Save()
+```
+
+Because `warehouse.usda` is plain text, you can open it in any editor, diff it, and review it like code. Binary `.usdc` files hold the same data in a more compact, faster-loading form.
+
+### Layers, References, and Variants
+
+The real power of USD shows up when several files cooperate. The tabs below show the three composition tools you will use most often.
+
+<Tabs>
+  <TabItem value="layers" label="Layers" default>
+    Sublayers stack opinions. Edits go to the current **edit target**, so each team member can own a layer.
+
+    ```python
+    from pxr import Usd, Sdf, UsdGeom, Gf
+
+    stage = Usd.Stage.Open("warehouse.usda")
+
+    # Create a separate layer for lighting and add it as a sublayer
+    lighting = Sdf.Layer.CreateNew("lighting.usda")
+    stage.GetRootLayer().subLayerPaths.append("lighting.usda")
+
+    # Direct new edits into the lighting layer
+    stage.SetEditTarget(Usd.EditTarget(lighting))
+    light = stage.DefinePrim("/World/KeyLight", "DistantLight")
+    light.CreateAttribute("inputs:intensity", Sdf.ValueTypeNames.Float).Set(3000.0)
+
+    lighting.Save()
+    stage.GetRootLayer().Save()
+    ```
+  </TabItem>
+  <TabItem value="references" label="References">
+    References bring in another asset, such as a robot, under a new path. The original file is never modified.
+
+    ```python
+    from pxr import Usd, UsdGeom, Gf
+
+    stage = Usd.Stage.Open("warehouse.usda")
+
+    # Reference a robot asset (local path or Nucleus/HTTP URL)
+    robot = stage.DefinePrim("/World/Robot", "Xform")
+    robot.GetReferences().AddReference("./assets/humanoid.usd")
+
+    # Local override: move the referenced robot without editing its file
+    UsdGeom.XformCommonAPI(robot).SetTranslate(Gf.Vec3d(0.0, 0.0, 1.05))
+
+    stage.GetRootLayer().Save()
+    ```
+  </TabItem>
+  <TabItem value="variants" label="Variants">
+    Variant sets store alternatives on one prim. Only the selected variant is composed.
+
+    ```python
+    from pxr import Usd, UsdGeom
+
+    stage = Usd.Stage.Open("warehouse.usda")
+
+    # A new prim whose size is authored ONLY inside the variants
+    obstacle = UsdGeom.Cube.Define(stage, "/World/Obstacle")
+    vset = obstacle.GetPrim().GetVariantSets().AddVariantSet("size")
+    for name, edge in [("small", 0.2), ("large", 0.5)]:
+        vset.AddVariant(name)
+        vset.SetVariantSelection(name)
+        with vset.GetVariantEditContext():
+            obstacle.GetSizeAttr().Set(edge)
+
+    vset.SetVariantSelection("small")      # choose the active variant
+    print(obstacle.GetSizeAttr().Get())    # 0.2
+    stage.GetRootLayer().Save()
+    ```
+
+    Local opinions are stronger than variant opinions. If the prim also had a size authored outside the variant set, that local value would win and switching variants would appear to do nothing.
+  </TabItem>
+</Tabs>
+
+## Standalone Python Workflow
+
+Isaac Sim can be driven interactively through its GUI, through the Script Editor, or as a **standalone Python application**. Standalone scripts are the preferred workflow for reproducible experiments, CI jobs, and headless training runs.
+
+The one rule that surprises newcomers: **`SimulationApp` must be created before any other Omniverse import.** Creating it boots the Kit runtime, and the other `omni.*` modules only exist after that.
+
+```python
+# run with: ./python.sh humanoid_hello.py   (from the Isaac Sim install folder)
+from omni.isaac.kit import SimulationApp
+
+# 1. Boot Kit FIRST. headless=True skips the GUI window.
+simulation_app = SimulationApp({"headless": False, "width": 1280, "height": 720})
+
+# 2. Only now import the rest of the Isaac Sim API
+import numpy as np
+from omni.isaac.core import World
+from omni.isaac.core.articulations import Articulation
+from omni.isaac.core.utils.stage import add_reference_to_stage
+from omni.isaac.core.utils.nucleus import get_assets_root_path
+from omni.isaac.core.utils.types import ArticulationAction
+
+# 3. Build the world: physics + rendering step at fixed rates
+world = World(stage_units_in_meters=1.0, physics_dt=1.0 / 200.0, rendering_dt=1.0 / 50.0)
+world.scene.add_default_ground_plane()
+
+# 4. Reference a robot asset. The exact path depends on your Isaac Sim
+#    version; browse the Isaac assets in the GUI to confirm it.
+assets_root = get_assets_root_path()
+robot_usd = assets_root + "/Isaac/Robots/Unitree/H1/h1.usd"
+add_reference_to_stage(usd_path=robot_usd, prim_path="/World/H1")
+
+robot = world.scene.add(
+    Articulation(prim_path="/World/H1", name="h1", position=np.array([0.0, 0.0, 1.05]))
+)
+
+# 5. reset() initializes physics handles; call it before reading joint state
+world.reset()
+print(f"{robot.num_dof} DOF: {robot.dof_names}")
+
+default_pose = robot.get_joint_positions()
+controller = robot.get_articulation_controller()
+
+# 6. Main loop: gently oscillate every joint around its default position
+for step in range(2000):
+    t = step * world.get_physics_dt()
+    targets = default_pose + 0.1 * np.sin(2.0 * np.pi * 0.5 * t)
+    controller.apply_action(ArticulationAction(joint_positions=targets))
+    world.step(render=True)
+
+simulation_app.close()
+```
+
+A few details are worth noticing:
+
+- **`physics_dt` versus `rendering_dt`**: physics is stepped several times per rendered frame. Legged robots usually need a small physics step for stable contacts.
+- **Position targets, not positions**: `joint_positions` in an `ArticulationAction` are *targets* for the joint drives. How closely the robot tracks them depends on the drive stiffness and damping authored in the USD file.
+- **The robot will likely fall.** Nothing in this script balances the humanoid. That is the subject of Chapter 3.
+
+### Reading and Modifying USD from Isaac Sim
+
+Because Isaac Sim's scene is a USD stage, you can mix the Core API with raw `pxr` calls:
+
+```python
+import omni.usd
+from pxr import UsdPhysics
+
+stage = omni.usd.get_context().get_stage()
+
+# List every revolute joint in the robot and read its drive stiffness
+for prim in stage.Traverse():
+    if not prim.GetPath().HasPrefix("/World/H1"):
+        continue
+    if prim.IsA(UsdPhysics.RevoluteJoint):
+        drive = UsdPhysics.DriveAPI.Get(prim, "angular")
+        stiffness = drive.GetStiffnessAttr().Get() if drive else None
+        print(f"{prim.GetPath()}  stiffness={stiffness}")
+```
+
+## Isaac Sim Compared with Gazebo
+
+| Aspect | Gazebo (Module 3) | Isaac Sim |
+|--------|-------------------|-----------|
+| **Scene format** | SDF / URDF | USD (URDF and MJCF can be imported) |
+| **Physics** | Several engines (DART, Bullet, others) | NVIDIA PhysX, with GPU acceleration |
+| **Rendering** | Rasterized (OGRE) | RTX ray tracing and path tracing |
+| **GPU requirement** | Not required | NVIDIA RTX-class GPU required |
+| **ROS 2 integration** | `ros_gz` bridge | ROS 2 bridge extension via OmniGraph |
+| **Synthetic data** | Limited, custom plugins | Replicator with built-in annotators |
+
+## Common Pitfalls
+
+- **Importing `omni.*` before `SimulationApp`.** You will see `ModuleNotFoundError` or strange extension errors. Always create `SimulationApp` first.
+- **Mixing 4.x and 4.5+ tutorials.** Code using `isaacsim.core.api` will not run on 4.2, and vice versa. Check which release a tutorial targets.
+- **Forgetting `world.reset()`.** Articulation handles are not valid until the world has been reset at least once.
+- **Wrong units or up axis.** Assets authored in centimeters or Y-up will appear tiny or sideways. Check `metersPerUnit` and `upAxis` on the stage.
+- **Editing the wrong layer.** Changes land on the current edit target. If a change "disappears" after reload, it was probably written to the session layer instead of the file you saved.
+- **Hard-coded asset paths.** Asset locations move between releases; resolve them via `get_assets_root_path()` and verify in the asset browser.
+
+## Summary
+
+- **Isaac Sim** is an Omniverse Kit application combining a USD stage, PhysX physics, RTX rendering, and robotics extensions
+- **USD** describes scenes as composed layers of prims and attributes, with references and variants enabling reuse without copying
+- The **`pxr`** API lets you author and inspect USD programmatically, inside or outside Isaac Sim
+- **Standalone scripts** start with `SimulationApp`, then build a `World`, add articulations, call `reset()`, and step the simulation
+- Isaac Sim's Python API **changed names in 4.5**; always match code to your installed release
+
+## What's Next?
+
+In the next chapter we connect Isaac Sim to ROS 2 and build GPU-accelerated perception pipelines with **Isaac ROS**.
+
+---
+
+## Exercises
+
+import { Exercise } from '@site/src/components/Exercise';
+
+<Exercise
+  title="Concept Check: USD Composition"
+  difficulty="beginner"
+  estimatedTime={15}
+  type="conceptual"
+>
+
+Answer the following questions:
+
+1. What is the difference between a USD layer and a USD reference?
+2. Why must `SimulationApp` be created before importing `omni.isaac.core`?
+3. Give one robotics use case for a USD variant set other than the examples in this chapter.
+
+</Exercise>
+
+<Exercise
+  title="Coding: Build a Randomizable Test Scene"
+  difficulty="intermediate"
+  estimatedTime={40}
+  type="coding"
+  hint="Use usd-core from PyPI if you do not have Isaac Sim installed. Create the shelf positions in a loop and put each obstacle size in a variant set."
+>
+
+Using only the `pxr` API, write a script that:
+
+1. Creates a Z-up, meter-scale stage with a `/World` default prim
+2. Adds five shelves in a row with colliders
+3. Adds three obstacle boxes, each with a `size` variant set containing `small`, `medium`, and `large` variants
+4. Writes all lighting prims into a separate `lighting.usda` sublayer
+
+Open the resulting `.usda` files in a text editor and confirm the structure matches your expectations.
+
+</Exercise>
+
+<Exercise
+  title="Hands-on Lab: Joint Sweep and Drive Tuning"
+  difficulty="advanced"
+  estimatedTime={90}
+  type="hands-on"
+  hint="Fix the base in place first (or raise it and disable gravity on the root) so you can study joint tracking without the robot falling."
+>
+
+Extend the standalone script from this chapter to study joint drive behavior:
+
+1. Command a single knee joint through a sine-wave trajectory while holding all other joints at their default positions
+2. Log commanded versus measured joint position at every physics step
+3. Repeat with at least three different drive stiffness and damping settings, changed via the `pxr` `DriveAPI`
+4. Plot the tracking error and write a short explanation of how stiffness and damping affect it
+
+</Exercise>

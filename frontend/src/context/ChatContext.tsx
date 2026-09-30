@@ -1,5 +1,10 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { sendChatMessage } from '@site/src/hooks/useChat';
+import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
+import { sendChatMessage, checkBackendReady } from '@site/src/hooks/useChat';
+import { answerFromBook, loadIndex } from '@site/src/lib/bookAssistant';
+
+/** Which engine produced an answer: the Gemini RAG backend or in-browser retrieval over the book. */
+export type AnswerMode = 'gemini' | 'book';
 
 /**
  * Message in a chat conversation.
@@ -11,6 +16,7 @@ export interface ChatMessage {
   timestamp: Date;
   sources?: ChatSource[];
   selectionContext?: SelectionContext;
+  mode?: AnswerMode;
 }
 
 /**
@@ -21,6 +27,8 @@ export interface ChatSource {
   chapterId: string;
   section: string;
   score: number;
+  /** Path relative to the site baseUrl, e.g. "docs/module-2-ros2/ros2-architecture#topics". */
+  url?: string;
 }
 
 /**
@@ -75,8 +83,8 @@ function getCurrentChapterId(): string | undefined {
   if (typeof window === 'undefined') return undefined;
 
   const path = window.location.pathname;
-  // Match /docs/module-N-xxx/chapter-slug pattern
-  const match = path.match(/\/docs\/(module-\d+-[^/]+\/[^/]+)/);
+  // Match /docs/module-N-xxx/chapter-slug (works under any baseUrl)
+  const match = path.match(/\/docs\/(module-\d+-[^/]+\/[^/#?]+)/);
   return match ? match[1] : undefined;
 }
 
@@ -84,6 +92,8 @@ function getCurrentChapterId(): string | undefined {
  * Provider component for chat state.
  */
 export function ChatProvider({ children }: { children: React.ReactNode }) {
+  const { siteConfig } = useDocusaurusContext();
+  const baseUrl = siteConfig.baseUrl;
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -150,48 +160,63 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     const currentSelection = selectionContext;
     setSelectionContext(null);
 
-    try {
-      const currentChapterId = getCurrentChapterId();
+    const currentChapterId = getCurrentChapterId();
+    const selectedText = currentSelection?.text;
 
-      // Use the non-streaming API for now (streaming can be enabled later)
-      const result = await sendChatMessage({
-        query: content.trim(),
-        selectedText: currentSelection?.text,
-        chapterId: currentSelection?.chapterId || currentChapterId,
-        sessionId: sessionId || undefined,
-      });
-
-      // Update session ID
-      if (result.sessionId) {
-        setSessionId(result.sessionId);
-      }
-
-      // Add assistant message
-      const assistantMessage: ChatMessage = {
+    const answerLocally = async (): Promise<ChatMessage> => {
+      const index = await loadIndex(baseUrl);
+      const local = answerFromBook(index, content.trim(), { route: currentChapterId, selectedText });
+      return {
         id: `msg-${Date.now()}-assistant`,
         role: 'assistant',
-        content: result.answer,
+        content: local.answer,
         timestamp: new Date(),
-        sources: result.sources,
+        sources: local.sources,
+        mode: 'book',
       };
+    };
 
-      setMessages((prev) => [...prev, assistantMessage]);
+    try {
+      let assistantMessage: ChatMessage | null = null;
+      // Prefer the Gemini RAG backend when it reports healthy; otherwise (or
+      // if it fails mid-request) answer from the book in the browser.
+      if (await checkBackendReady()) {
+        try {
+          const result = await sendChatMessage({
+            query: content.trim(),
+            selectedText,
+            chapterId: currentSelection?.chapterId || currentChapterId,
+            sessionId: sessionId || undefined,
+          });
+          if (result.sessionId) setSessionId(result.sessionId);
+          assistantMessage = {
+            id: `msg-${Date.now()}-assistant`,
+            role: 'assistant',
+            content: result.answer,
+            timestamp: new Date(),
+            sources: result.sources.map((src) => ({ ...src, url: `docs/${src.chapterId}` })),
+            mode: 'gemini',
+          };
+        } catch {
+          assistantMessage = null;
+        }
+      }
+      if (!assistantMessage) assistantMessage = await answerLocally();
+      setMessages((prev) => [...prev, assistantMessage as ChatMessage]);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to send message';
       setError(errorMessage);
-
-      // Add error message to chat
       const errorAssistantMessage: ChatMessage = {
         id: `msg-${Date.now()}-error`,
         role: 'assistant',
-        content: 'Sorry, I encountered an error processing your request. Please try again.',
+        content: 'Sorry, I could not load the textbook index. Check your connection and try again.',
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, errorAssistantMessage]);
     } finally {
       setIsLoading(false);
     }
-  }, [selectionContext, sessionId]);
+  }, [selectionContext, sessionId, baseUrl]);
 
   const clearMessages = useCallback(() => {
     setMessages([]);

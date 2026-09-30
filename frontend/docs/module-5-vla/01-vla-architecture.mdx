@@ -1,0 +1,364 @@
+---
+sidebar_position: 2
+title: VLA Architecture
+description: How Vision-Language-Action models turn camera images and natural-language instructions into robot actions
+keywords: [vla, vision-language-action, rt-1, rt-2, openvla, action-tokenization, diffusion-policy, robot-learning]
+# Instructor metadata (T075)
+week: 11
+estimated_time: 60
+difficulty: advanced
+learning_objectives:
+  - Describe the three building blocks of a VLA model - vision encoder, language backbone, and action head
+  - Compare discretized action tokens with continuous action heads such as diffusion and flow policies
+  - Summarize the key ideas behind RT-1, RT-2, OpenVLA, and generalist robot policies
+  - Explain how teleoperation demonstrations and cross-embodiment datasets are used to train VLAs
+  - Identify the limitations and safety requirements of deploying VLA policies on real robots
+prerequisites:
+  - module-1-intro/01-what-is-physical-ai
+  - module-1-intro/02-sensor-systems
+  - module-4-isaac/index
+---
+
+# Vision-Language-Action Architecture
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Describe the three building blocks of a VLA model: vision encoder, language backbone, and action head
+2. Compare discretized action tokens with continuous action heads such as diffusion and flow policies
+3. Summarize the key ideas behind RT-1, RT-2, OpenVLA, and generalist robot policies
+4. Explain how teleoperation demonstrations and cross-embodiment datasets are used to train VLAs
+5. Identify the limitations and safety requirements of deploying VLA policies on real robots
+
+---
+
+## Introduction
+
+In earlier modules, a robot's behavior was assembled from separate, hand-engineered parts: a perception pipeline, a planner, and a controller, glued together with ROS 2 topics. A **Vision-Language-Action (VLA) model** collapses much of this stack into a single neural network. It takes a camera image and an instruction such as "put the red cup in the sink" and directly outputs the next robot action.
+
+The idea builds on the success of large vision-language models (VLMs). Those models already know what a cup is, what "red" means, and roughly where things are in an image. A VLA adds one more output modality, **actions**, and is trained on robot demonstrations so that this knowledge can be turned into motion.
+
+:::note Key Insight
+A VLA is best understood as a vision-language model whose vocabulary has been extended to include motor commands. Everything you know about transformers, tokens, and pretraining carries over; the new problems are data collection, action representation, and safety.
+:::
+
+## The Three Building Blocks
+
+```text
+┌───────────────────────────────────────────────────────────────────┐
+│                     Vision-Language-Action Model                   │
+├───────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  Camera image(s) ──> [Vision Encoder] ──> visual tokens ──┐        │
+│                      (ViT / CNN)                          │        │
+│                                                           ▼        │
+│  "pick up the     ──> [Tokenizer + Embedding] ──> [Language Model  │
+│   red cup"                                         Backbone]       │
+│                                                           │        │
+│  Robot state      ──> [Proprio Encoder] (optional) ───────┘        │
+│  (joint angles)                                           │        │
+│                                                           ▼        │
+│                                                   [Action Head]    │
+│                                                           │        │
+│                                   Δx, Δy, Δz, Δroll, Δpitch, Δyaw, │
+│                                   gripper  (one step or a chunk)   │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+### 1. Vision Encoder
+
+The vision encoder turns pixels into a sequence of embedding vectors. Most modern VLAs use a **Vision Transformer (ViT)** pretrained on large image or image-text datasets (for example CLIP- or SigLIP-style encoders, or self-supervised encoders such as DINOv2). An image is split into patches, each patch becomes one token, and the result is a grid of visual tokens the language model can attend to.
+
+### 2. Language Model Backbone
+
+The backbone is usually a pretrained decoder-only transformer. Visual tokens are projected into the same embedding space as word tokens and concatenated with the instruction. Because the backbone was pretrained on internet-scale text (and often image-text pairs), it brings semantic knowledge the robot data alone could never provide.
+
+### 3. Action Head
+
+The action head converts the backbone's hidden states into a command for the robot. Typical action spaces are:
+
+- **End-effector deltas**: change in position and orientation of the gripper plus a gripper open/close value
+- **Joint targets**: desired joint positions for each actuator (common on humanoids)
+- **Base velocity**: linear and angular velocity for a mobile base
+
+How the head represents these numbers is the most important design choice in a VLA, and it is the topic of the next section.
+
+## Action Representation: Tokens vs Continuous Heads
+
+<Tabs>
+<TabItem value="discrete" label="Discretized Action Tokens" default>
+
+The simplest approach treats actions like words. Each continuous action dimension is clipped to a range and split into a fixed number of **bins**. RT-1 and RT-2 used 256 bins per dimension. The model then predicts one token per dimension with an ordinary cross-entropy loss, exactly like next-word prediction.
+
+```python
+import numpy as np
+
+class ActionTokenizer:
+    """Map continuous actions to integer bins and back."""
+
+    def __init__(self, low: np.ndarray, high: np.ndarray, n_bins: int = 256):
+        self.low, self.high, self.n_bins = low, high, n_bins
+
+    def encode(self, action: np.ndarray) -> np.ndarray:
+        clipped = np.clip(action, self.low, self.high)
+        norm = (clipped - self.low) / (self.high - self.low)      # 0..1
+        return np.minimum((norm * self.n_bins).astype(int), self.n_bins - 1)
+
+    def decode(self, tokens: np.ndarray) -> np.ndarray:
+        centers = (tokens + 0.5) / self.n_bins                   # bin centers
+        return self.low + centers * (self.high - self.low)
+
+tok = ActionTokenizer(low=np.full(7, -1.0), high=np.full(7, 1.0))
+a = np.array([0.10, -0.25, 0.0, 0.0, 0.05, 0.0, 1.0])
+print(tok.encode(a))              # seven integers in [0, 255]
+print(tok.decode(tok.encode(a)))  # close to a, with quantization error
+```
+
+**Pros:** reuses the language model's output layer and training recipe unchanged. **Cons:** quantization error, and predicting dimensions one token at a time is slow for high-rate control.
+
+</TabItem>
+<TabItem value="continuous" label="Continuous Heads (Diffusion / Flow)">
+
+A continuous head predicts real-valued actions directly. A plain regression head (MSE loss) averages over different valid demonstrations, which is a problem when there are several correct ways to do a task: averaging "go left around the obstacle" and "go right" produces "go straight into it".
+
+**Diffusion policies** and **flow-matching policies** solve this by learning to transform random noise into an action sample over several refinement steps, so they can represent multi-modal action distributions. They typically predict an **action chunk** (a short sequence of future actions) at once, which gives smoother motion.
+
+```python
+import torch
+import torch.nn as nn
+
+class FlowActionHead(nn.Module):
+    """Toy flow-matching head: predicts a velocity that moves noise toward an action chunk."""
+
+    def __init__(self, cond_dim: int, action_dim: int = 7, horizon: int = 8):
+        super().__init__()
+        self.action_dim, self.horizon = action_dim, horizon
+        flat = action_dim * horizon
+        self.net = nn.Sequential(
+            nn.Linear(cond_dim + flat + 1, 512), nn.GELU(),
+            nn.Linear(512, flat),
+        )
+
+    def forward(self, cond, noisy_actions, t):
+        # cond: (B, cond_dim)  noisy_actions: (B, H, A)  t: (B, 1) in [0, 1]
+        x = torch.cat([cond, noisy_actions.flatten(1), t], dim=-1)
+        return self.net(x).view(-1, self.horizon, self.action_dim)
+
+    @torch.no_grad()
+    def sample(self, cond, steps: int = 10):
+        a = torch.randn(cond.shape[0], self.horizon, self.action_dim)
+        for i in range(steps):                     # simple Euler integration
+            t = torch.full((cond.shape[0], 1), i / steps)
+            a = a + self.forward(cond, a, t) / steps
+        return a                                    # (B, H, A)
+```
+
+**Pros:** precise, smooth, multi-modal actions. **Cons:** more complex training and several network evaluations per inference.
+
+</TabItem>
+</Tabs>
+
+| Property | Discretized Tokens | Regression Head | Diffusion / Flow Head |
+|----------|-------------------|-----------------|-----------------------|
+| **Loss** | Cross-entropy over bins | Mean squared error | Denoising / flow-matching |
+| **Precision** | Limited by bin width | Continuous | Continuous |
+| **Multi-modal actions** | Yes (categorical) | No (averages modes) | Yes |
+| **Reuses LM output layer** | Yes | No | No |
+| **Inference cost** | One token per dimension | One pass | Several refinement steps |
+| **Typical output** | Single step | Single step or chunk | Action chunk |
+
+## A Toy VLA Forward Pass
+
+The following PyTorch model is far too small to control a robot, but it has the same data flow as a real VLA. Follow the shape comments carefully.
+
+```python
+import torch
+import torch.nn as nn
+
+class ToyVLA(nn.Module):
+    def __init__(self, vocab_size=1000, d_model=256, n_layers=4,
+                 patch=16, img_size=224, action_dim=7, n_bins=256):
+        super().__init__()
+        self.n_patches = (img_size // patch) ** 2                 # 196
+        # Vision encoder: patchify with a strided convolution
+        self.patch_embed = nn.Conv2d(3, d_model, kernel_size=patch, stride=patch)
+        self.img_pos = nn.Parameter(torch.zeros(1, self.n_patches, d_model))
+        # Language embedding
+        self.tok_embed = nn.Embedding(vocab_size, d_model)
+        # Proprioception (e.g. 7 joint angles)
+        self.state_proj = nn.Linear(7, d_model)
+        # Learned query tokens, one per action dimension
+        self.action_queries = nn.Parameter(torch.zeros(1, action_dim, d_model))
+        layer = nn.TransformerEncoderLayer(d_model, nhead=8, batch_first=True)
+        self.backbone = nn.TransformerEncoder(layer, num_layers=n_layers)
+        # Action head: logits over bins for each action dimension
+        self.action_head = nn.Linear(d_model, n_bins)
+
+    def forward(self, image, text_ids, state):
+        B = image.shape[0]
+        # image: (B, 3, 224, 224) -> (B, 256, 14, 14) -> (B, 196, 256)
+        v = self.patch_embed(image).flatten(2).transpose(1, 2) + self.img_pos
+        # text_ids: (B, T) -> (B, T, 256)
+        t = self.tok_embed(text_ids)
+        # state: (B, 7) -> (B, 1, 256)
+        s = self.state_proj(state).unsqueeze(1)
+        q = self.action_queries.expand(B, -1, -1)                  # (B, 7, 256)
+        x = torch.cat([v, t, s, q], dim=1)                         # (B, 196+T+1+7, 256)
+        h = self.backbone(x)
+        h_act = h[:, -q.shape[1]:, :]                              # (B, 7, 256)
+        return self.action_head(h_act)                             # (B, 7, 256 bins)
+
+model = ToyVLA()
+image = torch.randn(2, 3, 224, 224)
+text_ids = torch.randint(0, 1000, (2, 12))
+state = torch.randn(2, 7)
+logits = model(image, text_ids, state)
+print(logits.shape)                       # torch.Size([2, 7, 256])
+action_bins = logits.argmax(dim=-1)       # (2, 7) integer bins -> ActionTokenizer.decode
+```
+
+Real systems differ mainly in scale and in the use of **pretrained** vision and language weights; training from scratch, as above, would throw away the semantic knowledge that makes VLAs interesting.
+
+## Landmark Systems
+
+- **RT-1 (Robotics Transformer 1, 2022)** from Google showed that a transformer trained on a large set of real-world demonstrations, collected with a fleet of mobile manipulators, could perform hundreds of everyday instructions. It conditioned an image encoder on the instruction and output discretized action tokens.
+- **RT-2 (2023)** from Google DeepMind took a large pretrained vision-language model and fine-tuned it on robot data alongside web data, representing actions as text tokens. The key finding was that web-scale knowledge transferred to robot control: the model could follow instructions involving objects or concepts absent from the robot data.
+- **OpenVLA (2024)**, an open-source effort led by Stanford researchers, released a roughly 7-billion-parameter VLA built on an open language model with a combined vision encoder, trained on the Open X-Embodiment data. Open weights made it possible for labs and students to fine-tune a VLA on their own robot.
+- **Generalist robot policies** is the broader trend: a single policy trained on many robots and tasks, then adapted to a new robot with a small amount of data. Systems such as Octo and Physical Intelligence's pi-zero explored continuous action heads (diffusion and flow matching) in this setting.
+
+:::caution Reading Papers Critically
+Reported success rates depend heavily on the evaluation setup: which tasks, which scenes, how many trials, and what counts as success. Treat numbers from different papers as not directly comparable.
+:::
+
+## Training Data
+
+VLAs learn by **imitation**: they are trained to reproduce what a human operator did.
+
+1. **Teleoperation demonstrations**: an operator controls the robot with a VR headset, a spacemouse, or a leader-follower arm while cameras and joint encoders record everything. Each episode is a sequence of (observation, instruction, action) tuples.
+2. **Cross-embodiment datasets**: the **Open X-Embodiment** collaboration (2023) pooled demonstration datasets from many labs and many different robot types into a common format, making it possible to train one policy across embodiments.
+3. **Simulation data**: Isaac Sim (Module 4) can generate large volumes of scripted or teleoperated demonstrations, but a sim-to-real gap remains.
+4. **Web data**: image-text data used during VLM pretraining provides semantic knowledge, not motor skill.
+
+```python
+from dataclasses import dataclass
+import numpy as np
+
+@dataclass
+class Step:
+    image: np.ndarray        # (H, W, 3) uint8 from the wrist or head camera
+    state: np.ndarray        # (7,) joint positions in radians
+    action: np.ndarray       # (7,) end-effector delta + gripper command
+    instruction: str         # "open the top drawer"
+
+@dataclass
+class Episode:
+    steps: list[Step]
+    robot: str               # embodiment id, e.g. "humanoid_sim_v1"
+    success: bool            # operators label failed demos so they can be filtered
+```
+
+## Limitations and Safety
+
+VLAs are impressive but not yet dependable enough to run unsupervised. Key limitations:
+
+- **No guarantees**: a network output is not a verified plan. It can command collisions, excessive forces, or joint-limit violations.
+- **Distribution shift**: new lighting, camera placement, or object types can degrade performance sharply.
+- **Latency**: large backbones may run at only a few hertz, too slow for balance or contact-rich control on a humanoid, so VLAs usually sit above a fast low-level controller.
+- **Language ambiguity**: "clear the table" has many interpretations.
+
+Every VLA deployment should therefore wrap the policy in a **safety layer** that the network cannot override:
+
+```python
+import numpy as np
+
+class ActionSafetyFilter:
+    def __init__(self, max_delta=0.05, workspace_low=None, workspace_high=None):
+        self.max_delta = max_delta
+        self.ws_low = workspace_low if workspace_low is not None else np.array([0.2, -0.4, 0.0])
+        self.ws_high = workspace_high if workspace_high is not None else np.array([0.8, 0.4, 0.6])
+
+    def filter(self, ee_pos: np.ndarray, action: np.ndarray) -> np.ndarray:
+        safe = action.copy()
+        safe[:3] = np.clip(safe[:3], -self.max_delta, self.max_delta)   # rate limit
+        target = np.clip(ee_pos + safe[:3], self.ws_low, self.ws_high)  # workspace box
+        safe[:3] = target - ee_pos
+        if not np.all(np.isfinite(safe)):
+            return np.zeros_like(action)                                  # fail safe: stop
+        return safe
+```
+
+Pair this with a hardware emergency stop, force/torque limits in the low-level controller, and human supervision.
+
+## Common Pitfalls
+
+- **Mismatched action conventions**: training on end-effector deltas in the base frame and executing them in the camera frame. Always document frame, units, and normalization statistics with the checkpoint.
+- **Forgetting normalization**: actions are normalized per dataset during training; the same statistics must be used to un-normalize at inference.
+- **Assuming zero-shot transfer**: a generalist policy usually needs fine-tuning on the target robot and camera setup.
+- **Ignoring control rate**: running a slow VLA directly at the joint level causes jerky or unstable motion. Use action chunking or a low-level controller.
+- **Evaluating on training scenes only**: always test with new object positions, distractors, and lighting.
+
+## Summary
+
+- A **VLA** combines a vision encoder, a pretrained language backbone, and an action head
+- Actions can be **discretized into tokens** (simple, reuses the LM) or produced by **continuous heads** such as diffusion and flow policies (precise, multi-modal)
+- **RT-1**, **RT-2**, and **OpenVLA** mark the progression from robot-only training to web-knowledge transfer to open, fine-tunable models
+- Training data comes mainly from **teleoperation**, pooled in datasets such as **Open X-Embodiment**
+- VLAs must be wrapped in **safety filters** and supervised; they provide no correctness guarantees
+
+---
+
+## Exercises
+
+import { Exercise } from '@site/src/components/Exercise';
+
+<Exercise
+  title="Easy: VLA Building Blocks"
+  difficulty="beginner"
+  estimatedTime={10}
+  type="conceptual"
+>
+
+Answer the following questions:
+
+1. Name the three building blocks of a VLA and state what each one outputs.
+2. Why does a plain MSE regression head struggle when demonstrations contain two different valid strategies?
+3. What did RT-2 add compared with RT-1?
+
+</Exercise>
+
+<Exercise
+  title="Medium: Tokenizer Round Trip"
+  difficulty="intermediate"
+  estimatedTime={25}
+  type="coding"
+  hint="The worst-case quantization error for one dimension is half a bin width, which is (high - low) / (2 * n_bins)."
+>
+
+Using the `ActionTokenizer` class:
+
+1. Encode and decode 10,000 random actions and measure the maximum absolute error per dimension for 64, 256, and 1024 bins.
+2. Compare the measured error with the theoretical half-bin width.
+3. Plug `ToyVLA` output into the tokenizer: write a function that turns `logits` into continuous actions.
+
+</Exercise>
+
+<Exercise
+  title="Challenging: Safe VLA Execution Loop"
+  difficulty="advanced"
+  estimatedTime={60}
+  type="hands-on"
+  hint="Think about what should happen when the policy is slower than the controller, and when the filter changes the action significantly."
+>
+
+Design and implement a control loop that runs a VLA policy at a low rate and a joint controller at a high rate in Isaac Sim:
+
+1. Use action chunking so the controller always has a target.
+2. Pass every action through `ActionSafetyFilter` and log how often it intervenes.
+3. Add a watchdog that stops the robot if no new action arrives within a timeout.
+4. Write a short report on failure cases you observed.
+
+</Exercise>

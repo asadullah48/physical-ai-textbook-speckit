@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter
 
 from src.db.connection import check_database_connection
+from src.services.qdrant import check_qdrant_connection
 from src.models.schemas import HealthResponse
 
 router = APIRouter(prefix="/api/health", tags=["health"])
@@ -25,14 +26,15 @@ async def health_check() -> HealthResponse:
     # Check database connection
     db_healthy = await check_database_connection()
 
-    # TODO: Add vector store health check when Qdrant service is implemented
-    vector_store_healthy = None
+    # The chat needs the vector store as much as the database: report
+    # "healthy" only when both answer, so clients (the textbook site) can
+    # fall back to in-browser retrieval instead of calling a half-working API.
+    try:
+        vector_store_healthy = await check_qdrant_connection()
+    except Exception:  # noqa: BLE001 - a health check must not raise
+        vector_store_healthy = False
 
-    # Determine overall status
-    if db_healthy:
-        status = "healthy"
-    else:
-        status = "degraded"
+    status = "healthy" if (db_healthy and vector_store_healthy) else "degraded"
 
     return HealthResponse(
         status=status,

@@ -1,4 +1,3 @@
-import React from 'react';
 import clsx from 'clsx';
 import styles from './styles.module.css';
 
@@ -14,7 +13,7 @@ interface ModuleProgressProps {
  * Module progress component showing completion status.
  */
 export function ModuleProgress({
-  moduleId,
+  moduleId: _moduleId,
   title,
   totalChapters,
   completedChapters,

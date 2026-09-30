@@ -1,0 +1,354 @@
+---
+sidebar_position: 4
+title: Sim-to-Real Transfer
+description: Closing the reality gap with domain randomization, system identification, actuator and latency modelling, and a validation checklist
+keywords: [sim-to-real, reality-gap, domain-randomization, system-identification, actuator-model, latency, humanoid, simulation]
+# Instructor metadata (T075)
+week: 7
+estimated_time: 60
+difficulty: intermediate
+learning_objectives:
+  - Identify the main sources of the reality gap between simulation and hardware
+  - Implement physics, visual, and sensor-noise domain randomization
+  - Apply system identification to fit simulation parameters to real data
+  - Model actuator limits and control latency in simulation
+  - Apply a structured validation checklist before running a controller on real hardware
+prerequisites:
+  - module-3-simulation/01-gazebo-fundamentals
+  - module-3-simulation/02-sensor-simulation
+---
+
+# Sim-to-Real Transfer
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Identify the main sources of the reality gap between simulation and hardware
+2. Implement physics, visual, and sensor-noise domain randomization
+3. Apply system identification to fit simulation parameters to real data
+4. Model actuator limits and control latency in simulation
+5. Apply a structured validation checklist before running a controller on real hardware
+
+---
+
+## Introduction
+
+A controller that walks perfectly in Gazebo may fall over on its first real step. The difference between the simulated world and the physical one is called the **reality gap**. It cannot be eliminated — every simulator is an approximation — but it can be **narrowed** (make the simulator more accurate) and **bridged** (make the controller robust to whatever inaccuracy remains). Good sim-to-real practice does both.
+
+:::info Scope and Assumptions
+Code in this chapter is plain Python (NumPy and SciPy) so that it applies to any simulator, including Gazebo from the previous chapters and Isaac Sim in Module 4. Numeric ranges shown are illustrative starting points, not measured values for any particular robot — always derive yours from your own hardware and datasheets.
+:::
+
+## Sources of the Reality Gap
+
+| Source | Simulation assumption | Real-world behaviour |
+|--------|----------------------|---------------------|
+| **Rigid-body parameters** | Masses and inertias from CAD | Cables, fasteners, and batteries change mass distribution |
+| **Contact and friction** | Simplified friction cone, rigid contacts | Friction varies by surface, wear, and dust; feet deform |
+| **Actuators** | Ideal torque sources | Torque limits, gearbox friction, backlash, heating, bandwidth limits |
+| **Latency** | Commands applied instantly | Communication, computation, and driver delays of several milliseconds |
+| **Sensors** | Gaussian noise at best | Bias drift, dropouts, motion blur, timestamp jitter |
+| **Rendering** | Clean textures, ideal lighting | Glare, shadows, reflections, changing illumination |
+| **Environment** | Flat, known ground | Uneven floors, compliant carpets, unexpected obstacles |
+
+For humanoids, the actuator, latency, and contact rows usually dominate, because balance depends on applying the right force at the right time through the feet.
+
+## Domain Randomization
+
+**Domain randomization** trains or tunes a controller across many randomly varied simulations, so that the real world looks like just another sample from the training distribution. It was popularised for vision by Tobin et al. (2017, "Domain Randomization for Transferring Deep Neural Networks from Simulation to the Real World") and for dynamics by Peng et al. (2018, "Sim-to-Real Transfer of Robotic Control with Dynamics Randomization").
+
+The key design decision is the **range** of each parameter. Too narrow and the controller overfits to the simulator; too wide and it becomes overly conservative or fails to learn at all.
+
+<Tabs>
+<TabItem value="physics" label="Physics" default>
+
+```python
+from dataclasses import dataclass
+import numpy as np
+
+
+@dataclass
+class PhysicsSample:
+    """One randomized set of physics parameters for an episode."""
+    mass_scale: np.ndarray       # per-link multiplier
+    com_offset: np.ndarray       # per-link centre-of-mass shift (m), shape (N, 3)
+    ground_friction: float
+    joint_damping_scale: np.ndarray
+    motor_strength_scale: np.ndarray
+
+
+class PhysicsRandomizer:
+    """Samples physics parameters around nominal values."""
+
+    def __init__(self, n_links: int, n_joints: int, seed: int | None = None):
+        self.rng = np.random.default_rng(seed)
+        self.n_links = n_links
+        self.n_joints = n_joints
+
+    def sample(self) -> PhysicsSample:
+        return PhysicsSample(
+            mass_scale=self.rng.uniform(0.9, 1.1, self.n_links),
+            com_offset=self.rng.uniform(-0.01, 0.01, (self.n_links, 3)),
+            ground_friction=float(self.rng.uniform(0.5, 1.2)),
+            joint_damping_scale=self.rng.uniform(0.8, 1.2, self.n_joints),
+            motor_strength_scale=self.rng.uniform(0.85, 1.05, self.n_joints),
+        )
+```
+
+Apply each sample before an episode, for example by regenerating the robot's URDF from a Xacro template with the new values and respawning it, or through your simulator's parameter API.
+
+</TabItem>
+<TabItem value="visual" label="Visual">
+
+```python
+import numpy as np
+
+
+class VisualRandomizer:
+    """Produces lighting, texture, and camera parameters for one episode."""
+
+    def __init__(self, texture_files: list[str], seed: int | None = None):
+        self.rng = np.random.default_rng(seed)
+        self.textures = texture_files
+
+    def sample(self) -> dict:
+        return {
+            "light_direction": self.rng.normal([-0.5, 0.1, -0.9], 0.2).tolist(),
+            "light_intensity": float(self.rng.uniform(0.4, 1.2)),
+            "floor_texture": str(self.rng.choice(self.textures)),
+            "floor_rgb": self.rng.uniform(0.2, 0.9, 3).tolist(),
+            # Small camera mounting errors (rad) mimic imperfect calibration
+            "camera_rpy_offset": self.rng.normal(0.0, 0.01, 3).tolist(),
+            "camera_fov_scale": float(self.rng.uniform(0.97, 1.03)),
+        }
+```
+
+Visual randomization matters most for learned perception. Classical geometric pipelines are usually more sensitive to calibration errors than to textures.
+
+</TabItem>
+<TabItem value="sensor" label="Sensor noise">
+
+```python
+import numpy as np
+
+
+class IMUNoiseModel:
+    """White noise plus a random-walk bias, re-sampled per episode."""
+
+    def __init__(self, dt: float, seed: int | None = None):
+        self.rng = np.random.default_rng(seed)
+        self.dt = dt
+        self.reset()
+
+    def reset(self) -> None:
+        # Randomize the noise level itself between episodes
+        self.gyro_sigma = self.rng.uniform(1e-4, 5e-4)
+        self.gyro_bias_walk = self.rng.uniform(1e-6, 1e-5)
+        self.gyro_bias = self.rng.normal(0.0, 0.005, 3)
+        self.dropout_prob = self.rng.uniform(0.0, 0.01)
+        self.last_output = np.zeros(3)
+
+    def apply(self, true_gyro: np.ndarray) -> np.ndarray:
+        self.gyro_bias += self.rng.normal(0.0, self.gyro_bias_walk * np.sqrt(self.dt), 3)
+        if self.rng.random() < self.dropout_prob:
+            return self.last_output          # stale sample, like a missed packet
+        out = true_gyro + self.gyro_bias + self.rng.normal(0.0, self.gyro_sigma, 3)
+        self.last_output = out
+        return out
+```
+
+Unlike the fixed SDF noise from the previous chapter, this model varies the noise parameters themselves, so the controller cannot tune itself to one specific noise level.
+
+</TabItem>
+</Tabs>
+
+## System Identification
+
+Randomization bridges the gap; **system identification** narrows it. The idea is to record real robot data, then adjust simulation parameters until the simulated response matches. Start with the parts that matter most: joint friction, damping, and actuator response.
+
+The example below fits viscous damping and Coulomb friction for a single joint, given a logged step response from hardware:
+
+```python
+import numpy as np
+from scipy.integrate import solve_ivp
+from scipy.optimize import least_squares
+
+
+def simulate_joint(params, t, torque, inertia):
+    """Single joint: I*qdd = tau - b*qd - fc*sign(qd)."""
+    b, fc = params
+
+    def dynamics(ti, x):
+        q, qd = x
+        tau = np.interp(ti, t, torque)
+        qdd = (tau - b * qd - fc * np.tanh(qd / 0.01)) / inertia  # smooth sign()
+        return [qd, qdd]
+
+    sol = solve_ivp(dynamics, (t[0], t[-1]), [0.0, 0.0], t_eval=t, max_step=1e-3)
+    return sol.y[1]  # joint velocity
+
+
+def identify_friction(t, torque, measured_velocity, inertia):
+    def residual(params):
+        return simulate_joint(params, t, torque, inertia) - measured_velocity
+
+    result = least_squares(residual, x0=[0.1, 0.1], bounds=([0.0, 0.0], [10.0, 10.0]))
+    return {"viscous_damping": result.x[0], "coulomb_friction": result.x[1],
+            "rmse": float(np.sqrt(np.mean(result.fun ** 2)))}
+```
+
+Good identification practice:
+
+- Use **several excitation signals** (steps, chirps, slow ramps), not one trajectory
+- Hold out part of the data and check that the fitted model predicts it
+- Identify with the robot **suspended** first (no contacts), then on the ground
+- Feed the identified values back into the URDF `<dynamics>` tags and centre your randomization ranges on them
+
+## Actuator and Latency Modelling
+
+Two effects break many humanoid controllers on first contact with hardware: **actuators that cannot deliver the commanded torque**, and **delays** between sensing and acting. Both are cheap to model.
+
+```python
+from collections import deque
+import numpy as np
+
+
+class ActuatorModel:
+    """PD position actuator with torque saturation and a torque-speed limit."""
+
+    def __init__(self, kp, kd, tau_max, vel_max):
+        self.kp, self.kd = kp, kd
+        self.tau_max, self.vel_max = tau_max, vel_max
+
+    def torque(self, q_des, q, qd):
+        tau = self.kp * (q_des - q) - self.kd * qd
+        # Available torque falls linearly to zero at maximum speed
+        available = self.tau_max * max(0.0, 1.0 - abs(qd) / self.vel_max)
+        return float(np.clip(tau, -available, available))
+
+
+class LatencyBuffer:
+    """Delays actions by a whole number of control steps."""
+
+    def __init__(self, delay_steps: int, default_action):
+        self.buffer = deque([default_action] * delay_steps, maxlen=delay_steps + 1)
+
+    def step(self, action):
+        self.buffer.append(action)
+        return self.buffer.popleft()
+```
+
+Measure the real end-to-end latency (sensor timestamp to motor response), then randomize the delay around it — for instance by sampling `delay_steps` per episode. Hwangbo et al. (2019, "Learning Agile and Dynamic Motor Skills for Legged Robots") went further and trained a neural network on real actuator data to replace the analytic model; that is worth considering once a simple model is not enough.
+
+## Simulation Best Practices
+
+- **Version everything**: world files, URDF, noise parameters, and randomization ranges belong in Git with the controller code.
+- **Seed your randomness** so a failure seen in simulation can be reproduced exactly.
+- **Match rates and interfaces**: run the controller in simulation at the same frequency, with the same message types, as on hardware. The code that ships should be the code that was simulated.
+- **Test headless in CI**: a short `gz sim -s` regression run catches broken models before anyone reaches the lab.
+- **Log both worlds identically**: record the same topics in simulation and on hardware (for example with `ros2 bag record`) so you can compare them side by side.
+- **Stress-test deliberately**: apply pushes, drop sensor packets, and lower friction in simulation to find failure margins before hardware does.
+
+## Validation Checklist: Sim to Humanoid Hardware
+
+Work through these stages in order. Do not move to the next stage until the current one passes.
+
+1. **Simulation robustness**
+   - [ ] Controller succeeds across the full randomization range, not only nominal parameters
+   - [ ] Latency and actuator models use measured values from the real robot
+   - [ ] Failure cases are understood and documented
+2. **Interface check (robot powered, motors disabled)**
+   - [ ] Every sensor topic arrives at the expected rate, frame, and sign convention
+   - [ ] Joint directions, zero offsets, and limits match the URDF
+   - [ ] Emergency stop tested and reachable by the operator
+3. **Suspended test (robot on a gantry or harness)**
+   - [ ] Low-gain joint tracking compared against simulation with identical commands
+   - [ ] Torque, velocity, and temperature limits enforced in software
+4. **Supported ground test**
+   - [ ] Standing balance with harness slack, then small perturbations
+   - [ ] Logged data compared with simulation; large discrepancies trigger re-identification
+5. **Free operation**
+   - [ ] Clear area, spotter present, gradually increasing task difficulty
+
+:::warning Safety First
+Humanoids are heavy, can fall suddenly, and have joints capable of injuring people. Follow your lab's safety procedures, keep a physical emergency stop within reach, and never test a new controller without a harness or spotter.
+:::
+
+## Common Pitfalls
+
+- **Randomizing everything, widely**: overly wide ranges produce timid controllers or prevent learning; start narrow, widen only where hardware tests show sensitivity.
+- **Randomizing around wrong nominal values**: if the nominal mass is wrong by a large margin, randomization hides the error instead of fixing it — identify first.
+- **Ignoring latency**: a controller tuned without delay often oscillates on hardware.
+- **Different code paths**: a "simulation-only" shortcut in the controller means the tested code is not the deployed code.
+- **Trusting a single successful run**: evaluate over many seeds and report the failure rate, not the best episode.
+
+## Summary
+
+- The **reality gap** comes from dynamics, contacts, actuators, latency, sensors, and rendering
+- **Domain randomization** makes controllers robust by training across varied physics, visuals, and noise
+- **System identification** narrows the gap by fitting simulation parameters to real data
+- Explicit **actuator** and **latency** models address the most common humanoid failure modes
+- A staged **validation checklist** — simulation, interface, suspended, supported, free — manages risk when moving to hardware
+
+## What's Next?
+
+Module 4 introduces **NVIDIA Isaac**, where GPU-parallel simulation makes large-scale domain randomization practical.
+
+---
+
+## Exercises
+
+import { Exercise } from '@site/src/components/Exercise';
+
+<Exercise
+  title="Easy: Name the Gap"
+  difficulty="beginner"
+  estimatedTime={10}
+  type="conceptual"
+>
+
+Answer the following questions:
+
+1. List four sources of the reality gap and give one example of each for a humanoid robot.
+2. Explain the difference between narrowing the reality gap and bridging it. Which technique in this chapter does each?
+3. Why should randomization ranges be centred on identified values rather than CAD values?
+
+</Exercise>
+
+<Exercise
+  title="Medium: Randomized Balance Test"
+  difficulty="intermediate"
+  estimatedTime={45}
+  type="coding"
+  hint="Wrap your controller's action output with LatencyBuffer and ActuatorModel, and sample a new PhysicsSample at the start of every episode. Keep a fixed list of seeds so results are reproducible."
+>
+
+Using a simple balancing model (for example an inverted pendulum or cart-pole in Python):
+
+1. Add `PhysicsRandomizer`, `IMUNoiseModel`, `ActuatorModel`, and `LatencyBuffer`
+2. Tune a PD controller that balances with **no** randomization
+3. Evaluate it over 100 seeded episodes **with** randomization and report the success rate
+4. Re-tune the controller to improve the randomized success rate and describe what changed
+
+</Exercise>
+
+<Exercise
+  title="Challenging: Sim-to-Real Validation Plan"
+  difficulty="advanced"
+  estimatedTime={60}
+  type="hands-on"
+  hint="For each stage, define a measurable pass criterion, for example a maximum tracking error between simulated and real joint trajectories under identical commands."
+>
+
+Write a validation plan for moving a walking controller from Gazebo to a real humanoid (real or hypothetical):
+
+1. List the parameters you would identify, the experiment for each, and the data you would log
+2. Choose randomization ranges and justify each one
+3. Expand the checklist in this chapter with measurable pass criteria for every stage
+4. Describe your rollback plan if a hardware stage fails
+
+</Exercise>

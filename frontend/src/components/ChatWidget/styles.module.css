@@ -426,3 +426,38 @@
     height: 48px;
   }
 }
+
+/* Answers keep their paragraph breaks and citation markers. */
+.messageText {
+  white-space: pre-wrap;
+}
+
+.modeLabel {
+  margin-top: 0.5rem;
+  font-size: 0.7rem;
+  opacity: 0.65;
+  font-style: italic;
+}
+
+.suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  width: 100%;
+}
+
+.suggestion {
+  text-align: left;
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--ifm-color-emphasis-300);
+  background: var(--ifm-background-color);
+  color: var(--ifm-font-color-base);
+  cursor: pointer;
+}
+
+.suggestion:hover {
+  border-color: var(--ifm-color-primary);
+}

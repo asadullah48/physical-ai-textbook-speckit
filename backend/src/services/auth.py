@@ -6,14 +6,21 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 from uuid import UUID
 
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from src.api.config import Settings
 from src.models.schemas import TokenPayload, TokenPair
 
-# Password hashing context using bcrypt
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# bcrypt is used directly: passlib 1.7.4 (unmaintained since 2020) crashes
+# against bcrypt>=4.1 during its backend self-test, which broke every
+# registration and login. Hashes stay standard $2b$ strings, so any hash
+# written earlier by passlib still verifies.
+_BCRYPT_MAX_BYTES = 72  # bcrypt ignores input past 72 bytes; make it explicit
+
+
+def _password_bytes(password: str) -> bytes:
+    return password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
 
 
 def hash_password(password: str) -> str:
@@ -25,7 +32,7 @@ def hash_password(password: str) -> str:
     Returns:
         Bcrypt hash of the password.
     """
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(_password_bytes(password), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -38,7 +45,10 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     Returns:
         True if password matches, False otherwise.
     """
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return bcrypt.checkpw(_password_bytes(plain_password), hashed_password.encode("utf-8"))
+    except ValueError:
+        return False
 
 
 def hash_token(token: str) -> str:

@@ -1,0 +1,380 @@
+---
+sidebar_position: 4
+title: URDF, TF2 and Launch Files
+description: Describing a humanoid with URDF and xacro, managing coordinate frames with TF2, and starting systems with Python launch files
+keywords: [ros2, urdf, xacro, tf2, robot_state_publisher, launch, humanoid]
+# Instructor metadata (T075)
+week: 5
+estimated_time: 110
+difficulty: intermediate
+learning_objectives:
+  - Model humanoid links and joints in URDF with visual, collision and inertial properties
+  - Use xacro macros and properties to avoid repetition in robot descriptions
+  - Broadcast and look up coordinate transforms with TF2 in rclpy
+  - Publish a robot model's frames with robot_state_publisher
+  - Write Python launch files with arguments for multi-node systems
+prerequisites:
+  - module-2-ros2/01-ros2-architecture
+  - module-2-ros2/02-services-actions-parameters
+---
+
+# URDF, TF2 and Launch Files
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Model humanoid links and joints in URDF with visual, collision and inertial properties
+2. Use xacro macros and properties to avoid repetition in robot descriptions
+3. Broadcast and look up coordinate transforms with TF2 in rclpy
+4. Publish a robot model's frames with `robot_state_publisher`
+5. Write Python launch files with arguments for multi-node systems
+
+---
+
+## Introduction
+
+So far our nodes exchanged joint angles as plain numbers. To answer questions like "where is the left foot relative to the pelvis?" or "where is that cup relative to the right hand?", ROS 2 needs a **model of the robot's body** and a way to track **coordinate frames** over time. **URDF** (Unified Robot Description Format) is an XML description of links, joints and physical properties; **TF2** keeps a time-stamped tree of coordinate frames and transforms between them; and **launch files** start and configure all the nodes needed to bring the robot up.
+
+The examples target ROS 2 Humble or Jazzy. Install the tools used below with:
+
+```bash
+sudo apt install ros-$ROS_DISTRO-xacro ros-$ROS_DISTRO-robot-state-publisher \
+  ros-$ROS_DISTRO-joint-state-publisher-gui ros-$ROS_DISTRO-tf2-tools liburdfdom-tools
+```
+
+## URDF: Links and Joints
+
+A robot model is a **tree**: every link except the root has exactly one parent joint. A humanoid's tree usually starts at the pelvis (`base_link`) and branches into the torso and two legs.
+
+```text
+base_link (pelvis)
+├── torso ── head ── camera_link
+│   ├── l_upper_arm ── l_forearm ── l_hand
+│   └── r_upper_arm ── r_forearm ── r_hand
+├── l_thigh ── l_shin ── l_foot
+└── r_thigh ── r_shin ── r_foot
+```
+
+Each **link** can have a `visual` element for rendering, a `collision` element for contact checking (usually simpler shapes than the visual) and an `inertial` element for dynamics: mass, center of mass and the 3x3 inertia tensor.
+
+Each **joint** connects a parent link to a child link with an `origin` (the child frame's pose in the parent frame) and a type:
+
+| Joint type | Motion | Humanoid example |
+|------------|--------|------------------|
+| `revolute` | Rotation with limits | Knee, elbow, hip pitch |
+| `continuous` | Unlimited rotation | Wheel, lidar spinner |
+| `prismatic` | Linear with limits | Linear actuator in a gripper |
+| `fixed` | None | Camera mounted on the head |
+| `floating` | 6 DOF | Pelvis relative to the world (mainly in simulation) |
+
+Here is the pelvis and the left thigh, connected by the hip pitch joint:
+
+```xml
+<?xml version="1.0"?>
+<robot name="mini_humanoid">
+  <link name="base_link">
+    <visual>
+      <geometry><box size="0.20 0.30 0.10"/></geometry>
+    </visual>
+    <collision>
+      <geometry><box size="0.20 0.30 0.10"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="3.0"/>
+      <inertia ixx="0.0250" ixy="0" ixz="0" iyy="0.0125" iyz="0" izz="0.0325"/>
+    </inertial>
+  </link>
+  <link name="l_thigh">
+    <visual>
+      <origin xyz="0 0 -0.18" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.04" length="0.36"/></geometry>
+    </visual>
+    <inertial>
+      <origin xyz="0 0 -0.18"/>
+      <mass value="1.5"/>
+      <inertia ixx="0.0168" ixy="0" ixz="0" iyy="0.0168" iyz="0" izz="0.0012"/>
+    </inertial>
+  </link>
+  <joint name="l_hip_pitch" type="revolute">
+    <parent link="base_link"/>
+    <child link="l_thigh"/>
+    <origin xyz="0 0.10 -0.05" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.57" upper="0.8" effort="60.0" velocity="5.0"/>
+  </joint>
+</robot>
+```
+
+Units are SI: metres, radians, kilograms, newton-metres. Revolute and prismatic joints **must** have a `limit` tag with `effort` and `velocity`. Validate a file with `check_urdf mini_humanoid.urdf`, which prints the link tree or the first error.
+
+:::tip Getting Inertia Right
+Simulators such as Gazebo use the `inertial` block directly. Zero or wildly wrong inertia values make a humanoid explode or sink through the floor. For a solid cylinder of mass m, radius r and length h along z: ixx = iyy = m(3r² + h²)/12 and izz = mr²/2. The thigh values above follow this formula.
+:::
+
+## Xacro: Macros for Symmetric Robots
+
+A humanoid has two nearly identical legs and arms. **Xacro** (XML macros) adds properties, math expressions and macros so you describe a leg once.
+
+```xml
+<?xml version="1.0"?>
+<robot name="mini_humanoid" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:property name="thigh_len" value="0.36"/>
+  <xacro:property name="hip_offset" value="0.10"/>
+  <xacro:macro name="cylinder_inertia" params="m r h">
+    <inertia ixx="${m*(3*r*r + h*h)/12}" ixy="0" ixz="0"
+             iyy="${m*(3*r*r + h*h)/12}" iyz="0" izz="${m*r*r/2}"/>
+  </xacro:macro>
+  <!-- reflect = 1 for left, -1 for right -->
+  <xacro:macro name="leg" params="side reflect">
+    <link name="${side}_thigh">
+      <visual>
+        <origin xyz="0 0 ${-thigh_len/2}"/>
+        <geometry><cylinder radius="0.04" length="${thigh_len}"/></geometry>
+      </visual>
+      <inertial>
+        <origin xyz="0 0 ${-thigh_len/2}"/>
+        <mass value="1.5"/>
+        <xacro:cylinder_inertia m="1.5" r="0.04" h="${thigh_len}"/>
+      </inertial>
+    </link>
+    <joint name="${side}_hip_pitch" type="revolute">
+      <parent link="base_link"/>
+      <child link="${side}_thigh"/>
+      <origin xyz="0 ${reflect*hip_offset} -0.05"/>
+      <axis xyz="0 1 0"/>
+      <limit lower="-1.57" upper="0.8" effort="60.0" velocity="5.0"/>
+    </joint>
+    <!-- knee, shin, ankle and foot follow the same pattern -->
+  </xacro:macro>
+  <link name="base_link"/>
+  <xacro:leg side="l" reflect="1"/>
+  <xacro:leg side="r" reflect="-1"/>
+</robot>
+```
+
+Expand it with `xacro mini_humanoid.urdf.xacro > mini_humanoid.urdf` and check the result with `check_urdf`.
+
+## TF2: Coordinate Frames
+
+TF2 maintains a tree of frames and interpolates transforms in time. Mobile and legged robots follow the conventions in **REP 103** (units and axes: x forward, y left, z up) and **REP 105** (frame names). `map` is a fixed world frame that is globally consistent but may jump when localization corrects it; `odom` is smooth and continuous but drifts over time; `base_link` is attached to the robot body (the pelvis for most humanoids); sensor and limb frames such as `camera_link`, `imu_link`, `l_foot` and `r_hand` hang below it.
+
+Transforms come in two kinds. **Static** transforms never change (a camera bolted to the head) and are published once on `/tf_static`. **Dynamic** transforms change over time (the pelvis moving in `odom`) and are published repeatedly on `/tf`.
+
+<Tabs>
+  <TabItem value="broadcaster" label="Dynamic Broadcaster" default>
+
+```python
+# humanoid_basics/humanoid_basics/odom_broadcaster.py
+import math
+import rclpy
+from geometry_msgs.msg import TransformStamped
+from rclpy.node import Node
+from tf2_ros import TransformBroadcaster
+
+def yaw_to_quaternion(yaw):
+    return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
+
+class OdomBroadcaster(Node):
+    """Pretends the pelvis walks in a circle and broadcasts odom -> base_link."""
+    def __init__(self):
+        super().__init__('odom_broadcaster')
+        self.broadcaster = TransformBroadcaster(self)
+        self.t = 0.0
+        self.timer = self.create_timer(0.02, self.on_timer)
+
+    def on_timer(self):
+        self.t += 0.02
+        yaw = 0.2 * self.t
+        tf = TransformStamped()
+        tf.header.stamp = self.get_clock().now().to_msg()
+        tf.header.frame_id = 'odom'
+        tf.child_frame_id = 'base_link'
+        tf.transform.translation.x = math.sin(yaw)
+        tf.transform.translation.y = 1.0 - math.cos(yaw)
+        tf.transform.translation.z = 0.75          # pelvis height
+        r = tf.transform.rotation
+        r.x, r.y, r.z, r.w = yaw_to_quaternion(yaw)
+        self.broadcaster.sendTransform(tf)
+
+def main():
+    rclpy.init()
+    rclpy.spin(OdomBroadcaster())
+    rclpy.shutdown()
+```
+
+  </TabItem>
+  <TabItem value="listener" label="Listener">
+
+```python
+# humanoid_basics/humanoid_basics/foot_tracker.py
+import rclpy
+from rclpy.node import Node
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformException, TransformListener
+
+class FootTracker(Node):
+    """Reports where the left foot is in the odom frame."""
+    def __init__(self):
+        super().__init__('foot_tracker')
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.timer = self.create_timer(0.5, self.on_timer)
+
+    def on_timer(self):
+        try:
+            # Time() means "the latest available transform"
+            tf = self.tf_buffer.lookup_transform('odom', 'l_foot', Time())
+        except TransformException as ex:
+            self.get_logger().warn(f'could not transform: {ex}')
+            return
+        p = tf.transform.translation
+        self.get_logger().info(f'l_foot in odom: ({p.x:.2f}, {p.y:.2f}, {p.z:.2f})')
+
+def main():
+    rclpy.init()
+    rclpy.spin(FootTracker())
+    rclpy.shutdown()
+```
+
+  </TabItem>
+  <TabItem value="static" label="Static (CLI)">
+
+```bash
+# A head camera 10 cm forward and 5 cm above the head frame, tilted down 0.3 rad
+ros2 run tf2_ros static_transform_publisher \
+  --x 0.10 --y 0 --z 0.05 --roll 0 --pitch 0.3 --yaw 0 \
+  --frame-id head --child-frame-id camera_link
+```
+
+  </TabItem>
+</Tabs>
+
+Two tools help debug the tree:
+
+```bash
+ros2 run tf2_ros tf2_echo base_link l_foot   # print a transform continuously
+ros2 run tf2_tools view_frames               # writes frames.pdf with the full tree
+```
+
+## robot_state_publisher
+
+You rarely write broadcasters for every joint. **`robot_state_publisher`** reads the URDF from its `robot_description` parameter, subscribes to `/joint_states`, and publishes the transform for every joint: fixed joints once on `/tf_static`, movable joints on `/tf` whenever new joint states arrive. It also republishes the description on the `/robot_description` topic for RViz and other tools. Combined with the fake joint publisher from chapter 1, or with `joint_state_publisher_gui` for sliders, this gives you a moving humanoid model in RViz without writing any kinematics yourself.
+
+## Python Launch Files
+
+Starting four terminals by hand does not scale. A **launch file** describes a set of nodes, their parameters and remappings. Python launch files are the most flexible format.
+
+```python
+# humanoid_basics/launch/display.launch.py
+import os
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition, UnlessCondition
+from launch.substitutions import Command, LaunchConfiguration
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+
+def generate_launch_description():
+    pkg_share = get_package_share_directory('humanoid_basics')
+    xacro_file = os.path.join(pkg_share, 'urdf', 'mini_humanoid.urdf.xacro')
+    use_gui = LaunchConfiguration('use_gui')
+    robot_description = ParameterValue(Command(['xacro ', xacro_file]), value_type=str)
+
+    return LaunchDescription([
+        DeclareLaunchArgument('use_gui', default_value='true',
+                              description='Use slider GUI instead of fake gait'),
+        Node(package='robot_state_publisher', executable='robot_state_publisher',
+             parameters=[{'robot_description': robot_description}]),
+        Node(package='joint_state_publisher_gui', executable='joint_state_publisher_gui',
+             condition=IfCondition(use_gui)),
+        Node(package='humanoid_basics', executable='fake_joints',
+             condition=UnlessCondition(use_gui)),
+        Node(package='humanoid_basics', executable='odom_broadcaster'),
+        Node(package='rviz2', executable='rviz2', output='screen'),
+    ])
+```
+
+Install the `launch` and `urdf` folders so `get_package_share_directory` can find them, by adding to `data_files` in `setup.py`:
+
+```python
+from glob import glob
+# inside setup(...):
+data_files=[
+    # ...keep the two default entries generated by ros2 pkg create...
+    ('share/humanoid_basics/launch', glob('launch/*.launch.py')),
+    ('share/humanoid_basics/urdf', glob('urdf/*')),
+],
+```
+
+After rebuilding with `colcon build` and sourcing the workspace (add `--show-args` to list the available arguments):
+
+```bash
+ros2 launch humanoid_basics display.launch.py use_gui:=false
+```
+
+In RViz, set the fixed frame to `odom`, add a **RobotModel** display (topic `/robot_description`) and a **TF** display.
+
+## Common Pitfalls
+
+- **More than one parent.** URDF must be a tree; a link used as the child of two joints fails to parse. Closed kinematic loops are not supported.
+- **Missing `limit` on revolute joints, or degrees instead of radians.** The parser rejects the first; the second silently produces a wrong model, since `rpy` and limits are in radians.
+- **Two publishers for one transform.** If two nodes publish the same parent-child pair (for example a simulator and your own broadcaster both publishing `odom` to `base_link`), TF2 sees conflicting data and frames jump.
+- **Looking up transforms too early.** Right after startup the buffer is empty; always catch `TransformException`.
+- **Launch file not installed.** A new launch file is invisible to `ros2 launch` until it is in `data_files` and the package is rebuilt.
+- **Passing xacro output as a non-string.** Without `ParameterValue(..., value_type=str)`, the launch system may try to parse the URDF as YAML.
+
+## Summary
+
+- **URDF** models a robot as a tree of links (visual, collision, inertial) connected by typed joints
+- **Xacro** adds properties, expressions and macros so symmetric limbs are defined once
+- **TF2** tracks time-stamped frames following REP 103 and REP 105; use static transforms for rigid mounts and dynamic ones for motion
+- **robot_state_publisher** turns URDF plus `/joint_states` into the full transform tree
+- **Python launch files** start, configure and conditionally include nodes with one command
+
+---
+
+## Exercises
+
+import { Exercise } from '@site/src/components/Exercise';
+
+<Exercise
+  title="Easy: Read the Tree"
+  difficulty="beginner"
+  estimatedTime={15}
+  type="conceptual"
+>
+
+1. Using the tree diagram in this chapter, list the chain of frames TF2 must compose to express `r_hand` in `l_foot`.
+2. Which joint type would you use for a camera on the head, and why?
+3. Explain the difference between the `map` and `odom` frames.
+
+</Exercise>
+
+<Exercise
+  title="Medium: Complete the Leg Macro"
+  difficulty="intermediate"
+  estimatedTime={40}
+  type="coding"
+  hint="Chain the joints: base_link to thigh (hip_pitch), thigh to shin (knee), shin to foot (ankle_pitch). Each child origin sits at the end of its parent link, for example z = -thigh_len."
+>
+
+Extend the `leg` xacro macro with a shin, a foot (box), a `knee` joint (0 to 2.2 rad) and an `ankle_pitch` joint. Use the `cylinder_inertia` macro for the shin and write a `box_inertia` macro for the foot. Verify with `check_urdf`, then run the launch file with `use_gui:=true` and move each joint with the sliders.
+
+</Exercise>
+
+<Exercise
+  title="Challenging: Foot Placement Monitor"
+  difficulty="advanced"
+  estimatedTime={60}
+  type="hands-on"
+  hint="Look up both feet in the odom frame at the same timestamp. The foot with the lower z is the likely stance foot. Declare the threshold as a parameter."
+>
+
+Write a node, started from a new launch file together with the display stack, that looks up `l_foot` and `r_foot` in `odom` at 20 Hz, publishes the distance between the feet as a `std_msgs/msg/Float32`, and logs a warning when the step width falls below a `min_step_width` parameter loaded from YAML. Add a launch argument that selects the YAML file, and show the output of `ros2 run tf2_tools view_frames` for your running system.
+
+</Exercise>

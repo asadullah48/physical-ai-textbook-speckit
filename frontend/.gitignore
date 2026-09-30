@@ -1,2 +1,5 @@
 .vercel
 .env*.local
+
+# Generated at build time by scripts/build-search-index.mjs
+static/search-index.json

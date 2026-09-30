@@ -1,0 +1,380 @@
+---
+sidebar_position: 3
+title: Voice-to-Action Pipelines
+description: Building a safe speech-to-ROS 2 pipeline with Whisper, structured intent parsing, object grounding, and action goals
+keywords: [voice-control, speech-recognition, whisper, intent-parsing, pydantic, grounding, ros2-actions, rclpy]
+# Instructor metadata (T075)
+week: 11
+estimated_time: 75
+difficulty: advanced
+learning_objectives:
+  - Choose between local and cloud speech recognition for a robot based on latency, privacy, and robustness
+  - Parse free-form transcripts into a validated, structured command schema
+  - Ground object references in language to detections in the robot's camera frame
+  - Map validated commands to ROS 2 action goals behind a whitelist and a confirmation step
+prerequisites:
+  - module-5-vla/01-vla-architecture
+  - module-2-ros2/index
+---
+
+# Voice-to-Action Pipelines
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Choose between local and cloud speech recognition for a robot based on latency, privacy, and robustness
+2. Parse free-form transcripts into a validated, structured command schema
+3. Ground object references in language to detections in the robot's camera frame
+4. Map validated commands to ROS 2 action goals behind a whitelist and a confirmation step
+
+---
+
+## Introduction
+
+Speaking to a robot is the most natural interface humans have, and also one of the riskiest. A transcription error can turn "stop" into "shop"; an ambiguous phrase such as "put it over there" can be resolved in many ways. A good voice-to-action pipeline is therefore not a single model but a chain of stages, each of which narrows uncertainty and can reject bad input:
+
+```text
+Microphone ─> [Speech Recognition] ─> transcript
+          ─> [Intent Parser]        ─> structured command (validated schema)
+          ─> [Grounding]            ─> command with concrete object poses
+          ─> [Safety Gate]          ─> whitelist + confirmation
+          ─> [ROS 2 Action Client]  ─> goal sent to Nav2 / manipulation server
+```
+
+:::note Design Principle
+Free-form language should never reach an actuator directly. Every stage converts language into something more constrained, and the final stage accepts only a small, explicit set of actions.
+:::
+
+## Speech Recognition with Whisper
+
+**Whisper** is an open-weights speech recognition model released by OpenAI in 2022. It comes in several sizes, from small models that run on a laptop CPU to larger ones that benefit from a GPU. It handles accents and background noise reasonably well and supports many languages.
+
+<Tabs>
+<TabItem value="local" label="Local (faster-whisper)" default>
+
+Running locally keeps audio on the robot and works without a network connection.
+
+```python
+import numpy as np
+import sounddevice as sd
+from faster_whisper import WhisperModel
+SAMPLE_RATE = 16_000   # Whisper expects 16 kHz mono audio
+
+model = WhisperModel("base.en", device="cpu", compute_type="int8")
+
+def record(seconds: float = 4.0) -> np.ndarray:
+    audio = sd.rec(int(seconds * SAMPLE_RATE), samplerate=SAMPLE_RATE,
+                   channels=1, dtype="float32")
+    sd.wait()
+    return audio.flatten()
+
+def transcribe(audio: np.ndarray) -> str:
+    segments, _info = model.transcribe(audio, language="en", vad_filter=True)
+    return " ".join(seg.text.strip() for seg in segments)
+
+print(transcribe(record()))
+```
+
+</TabItem>
+<TabItem value="cloud" label="Cloud API (pluggable)">
+
+A hosted speech-to-text service can offer larger models without on-robot compute, at the cost of network latency, availability, and sending audio off the device. Hide the provider behind an interface so it can be swapped.
+
+```python
+import io
+from typing import Protocol
+import numpy as np, soundfile as sf
+
+class SpeechToText(Protocol):
+    def transcribe(self, audio: np.ndarray, sample_rate: int) -> str: ...
+
+class HttpSpeechToText:
+    """Generic client for any hosted STT endpoint that accepts a WAV upload."""
+
+    def __init__(self, session, url: str, api_key: str):
+        self.session, self.url, self.api_key = session, url, api_key
+
+    def transcribe(self, audio: np.ndarray, sample_rate: int) -> str:
+        buf = io.BytesIO()
+        sf.write(buf, audio, sample_rate, format="WAV")
+        resp = self.session.post(self.url, timeout=10,
+                                 headers={"Authorization": f"Bearer {self.api_key}"},
+                                 files={"file": ("speech.wav", buf.getvalue(), "audio/wav")})
+        resp.raise_for_status()
+        return resp.json()["text"]
+```
+
+</TabItem>
+</Tabs>
+
+| Factor | Local Whisper | Cloud STT |
+|--------|---------------|-----------|
+| **Latency** | Depends on on-board compute | Network round trip plus queueing |
+| **Offline operation** | Yes | No |
+| **Privacy** | Audio stays on the robot | Audio leaves the device |
+| **Model size** | Limited by robot hardware | Can use larger models |
+| **Operational cost** | Hardware and power | Per-request billing |
+| **Failure mode** | CPU/GPU overload | Network outage, rate limits |
+
+For safety-critical words such as "stop", do not depend on the full pipeline at all: use a dedicated, always-on keyword detector or a physical button that bypasses speech recognition entirely.
+
+## Intent Parsing into a Structured Schema
+
+A transcript is still free text. The intent parser converts it into a **typed command** that downstream code can check. Pydantic makes the schema explicit and gives validation for free.
+
+```python
+from typing import Literal, Optional
+from pydantic import BaseModel, Field
+
+ActionName = Literal["navigate_to", "pick", "place", "look_at", "stop"]
+
+class ObjectRef(BaseModel):
+    category: str = Field(description="Object class, e.g. 'cup'")
+    color: Optional[str] = None
+    relation: Optional[str] = None       # e.g. 'left of the sink'
+
+class RobotCommand(BaseModel):
+    action: ActionName
+    target: Optional[ObjectRef] = None
+    location: Optional[str] = Field(None, description="Named place, e.g. 'kitchen'")
+    confidence: float = Field(ge=0.0, le=1.0)
+    needs_clarification: bool = False
+    clarification_question: Optional[str] = None
+```
+
+The parser itself can be rule-based for a small vocabulary or backed by an LLM for open-ended speech. Keep the LLM client pluggable and always validate its output:
+
+```python
+import json
+from typing import Protocol
+from pydantic import ValidationError
+
+class LLMClient(Protocol):
+    def complete(self, system: str, user: str) -> str: ...
+
+SYSTEM_PROMPT = (
+    "You convert spoken robot instructions into JSON matching this schema:\n"
+    + json.dumps(RobotCommand.model_json_schema())
+    + "\nAllowed actions: navigate_to, pick, place, look_at, stop. "
+    "If the request is ambiguous or unsupported, set needs_clarification=true "
+    "and ask one short question. Output JSON only."
+)
+
+def parse_intent(llm: LLMClient, transcript: str) -> RobotCommand | None:
+    raw = llm.complete(SYSTEM_PROMPT, transcript)
+    try:
+        return RobotCommand.model_validate_json(raw)
+    except ValidationError:
+        return None      # caller asks the user to rephrase
+```
+
+:::caution
+An LLM may return an action name that is not in the schema, or valid JSON with nonsensical values. The `Literal` type rejects unknown actions at parse time; the whitelist in the safety gate is a second, independent check.
+:::
+
+## Grounding Language to Objects
+
+"The red cup" must become a specific detection with a 3D position. Grounding combines an **open-vocabulary detector** (a model that accepts a text query and returns boxes) with the depth image from Module 1.
+
+```python
+import numpy as np
+# detector.detect(rgb, query) returns objects with .label, .score and
+# .box = (x1, y1, x2, y2) in pixels
+def ground_object(ref: ObjectRef, detector, rgb, depth, intrinsics,
+                  min_score: float = 0.4):
+    query = f"{ref.color} {ref.category}" if ref.color else ref.category
+    dets = [d for d in detector.detect(rgb, query) if d.score >= min_score]
+    if not dets:
+        return None, "I can't see a " + query + "."
+    if len(dets) > 1 and ref.relation is None:
+        return None, f"I see {len(dets)} matches for {query}. Which one?"
+    best = max(dets, key=lambda d: d.score)
+    x1, y1, x2, y2 = best.box
+    u, v = (x1 + x2) // 2, (y1 + y2) // 2
+    z = float(np.median(depth[y1:y2, x1:x2][depth[y1:y2, x1:x2] > 0])) / 1000.0
+    x, y = (u - intrinsics.cx) * z / intrinsics.fx, (v - intrinsics.cy) * z / intrinsics.fy
+    return np.array([x, y, z]), None     # point in the camera optical frame
+```
+
+The returned point is in the camera frame; transform it to the robot base frame with `tf2` before sending it to a planner. Refusing to guess when there are several matches is a feature, not a bug.
+
+## Mapping Commands to ROS 2 Actions
+
+Each whitelisted action name maps to exactly one ROS 2 action server. Navigation uses Nav2's standard `NavigateToPose` action; manipulation uses a course-defined `PickObject` action from a `humanoid_interfaces` package that you create in the lab.
+
+| Command action | ROS 2 action type | Server |
+|----------------|-------------------|--------|
+| `navigate_to` | `nav2_msgs/action/NavigateToPose` | `/navigate_to_pose` |
+| `pick` | `humanoid_interfaces/action/PickObject` (course-defined) | `/pick_object` |
+| `stop` | Cancel all active goals | n/a |
+
+## A Complete rclpy Pipeline Node
+
+The node below ties everything together. Speech recognition, parsing, and grounding are injected so they can be mocked in tests.
+
+```python
+from rclpy.node import Node
+from rclpy.action import ActionClient
+from geometry_msgs.msg import PoseStamped
+from nav2_msgs.action import NavigateToPose
+from std_msgs.msg import String
+from humanoid_interfaces.action import PickObject   # course-defined interface
+
+ALLOWED_ACTIONS = {"navigate_to", "pick", "stop"}
+CONFIRM_REQUIRED = {"pick"}
+NAMED_PLACES = {"kitchen": (3.0, 1.5), "charging_dock": (0.0, 0.0)}
+
+class VoiceCommandNode(Node):
+    def __init__(self, stt, llm, grounder):
+        super().__init__("voice_command_node")
+        self.stt, self.llm, self.grounder = stt, llm, grounder
+        self.nav = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        self.pick = ActionClient(self, PickObject, "pick_object")
+        self.say = self.create_publisher(String, "tts/say", 10)
+        self.pending = None           # command waiting for confirmation
+        self.active_goals = []
+
+    def speak(self, text: str):
+        self.say.publish(String(data=text))
+
+    def handle_utterance(self, audio):
+        text = self.stt.transcribe(audio, 16_000).strip().lower()
+        if "stop" in text.split():                 # fast path, no LLM
+            return self.cancel_all()
+        if self.pending is not None:
+            return self.resolve_confirmation(text)
+        cmd = parse_intent(self.llm, text)
+        if cmd is None or cmd.needs_clarification:
+            return self.speak((cmd and cmd.clarification_question) or "Please rephrase.")
+        if cmd.action not in ALLOWED_ACTIONS:
+            return self.speak(f"I am not allowed to {cmd.action}.")
+        if cmd.confidence < 0.6:
+            return self.speak("I'm not sure I understood. Please repeat.")
+        if cmd.action == "pick" and cmd.target is None:
+            return self.speak("What should I pick up?")
+        if cmd.action in CONFIRM_REQUIRED:
+            self.pending = cmd
+            return self.speak(f"Do you want me to {cmd.action} the {cmd.target.category}? Say yes or no.")
+        self.execute(cmd)
+
+    def resolve_confirmation(self, text: str):
+        cmd, self.pending = self.pending, None
+        if text in ("yes", "yes please", "confirm"):
+            return self.execute(cmd)
+        self.speak("Cancelled.")
+
+    def execute(self, cmd):
+        if cmd.action == "navigate_to":
+            if cmd.location not in NAMED_PLACES:
+                return self.speak("I don't know that place.")
+            goal = NavigateToPose.Goal()
+            goal.pose = PoseStamped()
+            goal.pose.header.frame_id = "map"
+            goal.pose.header.stamp = self.get_clock().now().to_msg()
+            goal.pose.pose.position.x, goal.pose.pose.position.y = NAMED_PLACES[cmd.location]
+            goal.pose.pose.orientation.w = 1.0
+            self.send(self.nav, goal)
+        elif cmd.action == "pick":
+            # grounder wraps ground_object() and a tf2 transform to base_link
+            point, err = self.grounder.locate(cmd.target)
+            if err:
+                return self.speak(err)
+            goal = PickObject.Goal()
+            goal.object_label = cmd.target.category
+            goal.target.header.frame_id = "base_link"
+            goal.target.point.x, goal.target.point.y, goal.target.point.z = map(float, point)
+            self.send(self.pick, goal)
+
+    def send(self, client, goal):
+        if not client.wait_for_server(timeout_sec=2.0):
+            return self.speak("That skill is not available right now.")
+        future = client.send_goal_async(goal)
+        future.add_done_callback(self.on_goal_response)
+
+    def on_goal_response(self, future):
+        handle = future.result()
+        if not handle.accepted:
+            return self.speak("The robot rejected that goal.")
+        self.active_goals.append(handle)
+        handle.get_result_async().add_done_callback(
+            lambda f: self.speak("Done." if f.result().status == 4 else "That did not succeed."))
+
+    def cancel_all(self):
+        for handle in self.active_goals:
+            handle.cancel_goal_async()
+        self.active_goals.clear()
+        self.pending = None
+        self.speak("Stopping.")
+```
+
+Status value 4 is `GoalStatus.STATUS_SUCCEEDED` from `action_msgs`; import the constant in production code instead of using the literal. A `main()` function would create the node with concrete STT, LLM, and grounder objects and run a microphone thread that calls `handle_utterance` whenever voice activity ends.
+
+## Common Pitfalls
+
+- **Routing "stop" through the LLM**: emergency commands must bypass slow, fallible stages.
+- **Trusting LLM JSON**: always validate with a schema and a separate whitelist; never `eval` model output.
+- **Ignoring frames**: grounded points in the camera frame sent as if they were in `map` or `base_link`.
+- **Silent failures**: if the robot cannot see the object or reach the server, it must say so.
+- **Echo and self-hearing**: the robot's own text-to-speech output can be transcribed as a new command. Mute recognition while speaking.
+- **Confirmation fatigue**: confirming every trivial action trains users to say "yes" automatically. Reserve confirmation for actions that move objects or people.
+
+## Summary
+
+- A voice pipeline chains **speech recognition, intent parsing, grounding, a safety gate, and ROS 2 actions**
+- **Whisper** can run locally for privacy and offline operation, or a pluggable cloud service can be used
+- **Pydantic schemas** turn transcripts into validated, typed commands
+- **Open-vocabulary detection plus depth** grounds object references to 3D points
+- A **whitelist**, **confidence threshold**, and **confirmation step** keep free-form language away from actuators
+
+---
+
+## Exercises
+
+import { Exercise } from '@site/src/components/Exercise';
+
+<Exercise
+  title="Easy: Pipeline Stages"
+  difficulty="beginner"
+  estimatedTime={10}
+  type="conceptual"
+>
+
+1. List the five stages of the voice-to-action pipeline and the output of each.
+2. Give two reasons to run speech recognition locally on a humanoid robot.
+3. Why is the whitelist still necessary when the schema already uses a `Literal` type?
+
+</Exercise>
+
+<Exercise
+  title="Medium: Schema and Parser Tests"
+  difficulty="intermediate"
+  estimatedTime={30}
+  type="coding"
+  hint="Write a FakeLLM class whose complete() method returns canned strings, including malformed JSON and unknown action names."
+>
+
+1. Extend `RobotCommand` with a `place` action that requires both `target` and `location`, using a pydantic model validator.
+2. Write pytest tests for `parse_intent` covering valid output, invalid JSON, an unknown action, and a clarification request.
+
+</Exercise>
+
+<Exercise
+  title="Challenging: Voice-Commanded Navigation in Simulation"
+  difficulty="advanced"
+  estimatedTime={90}
+  type="hands-on"
+  hint="Start with a text topic instead of a microphone so you can script test utterances, then swap in real audio."
+>
+
+Run `VoiceCommandNode` against Nav2 in Gazebo or Isaac Sim:
+
+1. Add three named places to the map and navigate between them by voice.
+2. Measure end-to-end latency from end of speech to goal acceptance and identify the slowest stage.
+3. Demonstrate that "stop" cancels an active navigation goal.
+4. Record five failure cases (misheard words, unknown places) and how the robot responded.
+
+</Exercise>

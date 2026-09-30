@@ -1,0 +1,379 @@
+---
+sidebar_position: 3
+title: Sensor Simulation
+description: Simulating cameras, depth cameras, LiDAR, IMUs, and contact/force-torque sensors in Gazebo and bridging them to ROS 2
+keywords: [gazebo, sensors, sdf, ros_gz_bridge, rviz2, lidar, imu, camera, unity, simulation]
+# Instructor metadata (T075)
+week: 7
+estimated_time: 60
+difficulty: intermediate
+learning_objectives:
+  - Add camera, depth camera, GPU LiDAR, IMU, and contact/force-torque sensors to an SDF model
+  - Configure realistic noise models for simulated sensors
+  - Bridge Gazebo sensor topics to ROS 2 with a ros_gz_bridge YAML configuration
+  - Consume and visualise simulated sensor data with rclpy and RViz2
+  - Evaluate when Unity is an appropriate alternative for rendering
+prerequisites:
+  - module-1-intro/02-sensor-systems
+  - module-3-simulation/01-gazebo-fundamentals
+---
+
+# Sensor Simulation
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Add camera, depth camera, GPU LiDAR, IMU, and contact/force-torque sensors to an SDF model
+2. Configure realistic noise models for simulated sensors
+3. Bridge Gazebo sensor topics to ROS 2 with a `ros_gz_bridge` YAML configuration
+4. Consume and visualise simulated sensor data with rclpy and RViz2
+5. Evaluate when Unity is an appropriate alternative for rendering
+
+---
+
+## Introduction
+
+In Module 1 you learned how real cameras, LiDARs, and IMUs work. In simulation, those sensors are replaced by software models that render images, cast rays, or read physics state. A perception or balance pipeline that works on perfect, noise-free data will almost certainly fail on hardware, so adding **realistic noise** is as important as adding the sensor itself.
+
+:::info Version Assumptions
+As in the previous chapter, this chapter assumes **Gazebo Harmonic** with **ROS 2 Jazzy**, SDF 1.10, and the `ros-jazzy-ros-gz` packages.
+:::
+
+## Enabling Sensor Systems
+
+Sensors in Gazebo are driven by systems that must be loaded in the world file. Rendering-based sensors (cameras, depth cameras, GPU LiDAR) share one system; physics-based sensors each have their own:
+
+```xml
+<!-- Add these inside <world>, alongside the Physics system -->
+<plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"><render_engine>ogre2</render_engine></plugin>
+<plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+<plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
+<plugin filename="gz-sim-forcetorque-system" name="gz::sim::systems::ForceTorque"/>
+```
+
+| Sensor | SDF `type` | Needs system | Needs GPU rendering | Default output message |
+|--------|-----------|--------------|---------------------|------------------------|
+| RGB camera | `camera` | Sensors | Yes | `gz.msgs.Image` |
+| Depth camera | `depth_camera` | Sensors | Yes | `gz.msgs.Image` (float depth) |
+| GPU LiDAR | `gpu_lidar` | Sensors | Yes | `gz.msgs.LaserScan`, plus `PointCloudPacked` on a `/points` topic |
+| IMU | `imu` | Imu | No | `gz.msgs.IMU` |
+| Contact | `contact` | Contact | No | `gz.msgs.Contacts` |
+| Force-torque | `force_torque` | ForceTorque | No | `gz.msgs.Wrench` |
+
+## Adding Sensors to a Model
+
+Sensors are attached to **links** (or, for force-torque, to **joints**). In URDF, wrap the SDF sensor block in a `<gazebo reference="link_name">` element so the converter attaches it to the correct link.
+
+<Tabs>
+<TabItem value="camera" label="RGB Camera" default>
+
+```xml
+<sensor name="head_camera" type="camera">
+  <pose>0.05 0 0 0 0 0</pose>
+  <always_on>true</always_on>
+  <update_rate>30</update_rate>
+  <visualize>true</visualize>
+  <topic>head_camera/image</topic>
+  <gz_frame_id>head_camera_link</gz_frame_id>
+  <camera>
+    <horizontal_fov>1.047</horizontal_fov>
+    <image><width>640</width><height>480</height><format>R8G8B8</format></image>
+    <clip><near>0.05</near><far>50.0</far></clip>
+    <noise><type>gaussian</type><mean>0.0</mean><stddev>0.007</stddev></noise>
+  </camera>
+</sensor>
+```
+
+Image noise is additive per pixel, with the standard deviation expressed on a 0–1 intensity scale. The camera also publishes calibration on a `camera_info` topic next to the image topic.
+
+</TabItem>
+<TabItem value="depth" label="Depth Camera">
+
+```xml
+<sensor name="head_depth" type="depth_camera">
+  <update_rate>15</update_rate>
+  <topic>head_depth</topic>
+  <gz_frame_id>head_camera_link</gz_frame_id>
+  <camera>
+    <horizontal_fov>1.047</horizontal_fov>
+    <image><width>320</width><height>240</height><format>R_FLOAT32</format></image>
+    <clip><near>0.1</near><far>8.0</far></clip>
+    <noise><type>gaussian</type><mean>0.0</mean><stddev>0.01</stddev></noise>
+  </camera>
+</sensor>
+```
+
+Depth values are in metres. For combined colour and depth from one sensor, use the `rgbd_camera` type, which publishes image, depth image, and point cloud topics.
+
+</TabItem>
+<TabItem value="lidar" label="GPU LiDAR">
+
+```xml
+<sensor name="lidar" type="gpu_lidar">
+  <pose>0 0 0.1 0 0 0</pose>
+  <update_rate>10</update_rate>
+  <topic>lidar</topic>
+  <gz_frame_id>lidar_link</gz_frame_id>
+  <lidar>
+    <scan>
+      <horizontal><samples>720</samples><resolution>1</resolution>
+        <min_angle>-3.14159</min_angle><max_angle>3.14159</max_angle></horizontal>
+      <vertical><samples>16</samples><resolution>1</resolution>
+        <min_angle>-0.2618</min_angle><max_angle>0.2618</max_angle></vertical>
+    </scan>
+    <range><min>0.1</min><max>30.0</max><resolution>0.01</resolution></range>
+    <noise><type>gaussian</type><mean>0.0</mean><stddev>0.01</stddev></noise>
+  </lidar>
+</sensor>
+```
+
+With one vertical sample this behaves like a 2D laser scanner; with several it approximates a multi-beam 3D LiDAR.
+
+</TabItem>
+<TabItem value="imu" label="IMU">
+
+```xml
+<sensor name="torso_imu" type="imu">
+  <always_on>true</always_on>
+  <update_rate>200</update_rate>
+  <topic>imu</topic>
+  <gz_frame_id>torso_link</gz_frame_id>
+  <imu>
+    <angular_velocity>
+      <x><noise type="gaussian"><mean>0</mean><stddev>0.0002</stddev>
+        <bias_mean>0.00001</bias_mean><bias_stddev>0.000001</bias_stddev></noise></x>
+      <!-- y and z: identical noise blocks, omitted for brevity -->
+    </angular_velocity>
+    <linear_acceleration>
+      <x><noise type="gaussian"><mean>0</mean><stddev>0.017</stddev></noise></x>
+      <!-- y and z: identical noise blocks, omitted for brevity -->
+    </linear_acceleration>
+  </imu>
+</sensor>
+```
+
+Bias terms model the slowly varying offset that causes drift when integrating a real IMU. Take noise values from your IMU's datasheet rather than guessing.
+
+</TabItem>
+<TabItem value="contact" label="Contact and Force-Torque">
+
+```xml
+<!-- Contact sensor on the foot link: reports collisions of one collision element -->
+<sensor name="left_foot_contact" type="contact">
+  <update_rate>100</update_rate>
+  <topic>left_foot/contact</topic>
+  <contact><collision>left_foot_collision</collision></contact>
+</sensor>
+
+<!-- Force-torque sensor on the ankle JOINT (placed inside the joint element) -->
+<sensor name="left_ankle_ft" type="force_torque">
+  <update_rate>500</update_rate>
+  <topic>left_ankle/wrench</topic>
+  <force_torque><frame>child</frame><measure_direction>child_to_parent</measure_direction></force_torque>
+</sensor>
+```
+
+The `collision` name must match the collision element name **after** URDF-to-SDF conversion, which may differ from the URDF name. Check it with `gz sdf -p`.
+
+</TabItem>
+</Tabs>
+
+:::tip Noise Is Not Optional
+Gaussian noise is a first approximation only. Real sensors also exhibit motion blur, rolling shutter, exposure changes, missing LiDAR returns on glass or black surfaces, and IMU temperature drift. Chapter 3 shows how to randomize these effects further.
+:::
+
+## Bridging Sensor Topics to ROS 2
+
+Gazebo publishes on `gz-transport`; ROS 2 nodes need ROS topics. `ros_gz_bridge` translates between the two. For more than a couple of topics, use a YAML configuration file:
+
+```yaml
+# config/bridge.yaml
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/imu"
+  gz_topic_name: "/imu"
+  ros_type_name: "sensor_msgs/msg/Imu"
+  gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/scan"
+  gz_topic_name: "/lidar"
+  ros_type_name: "sensor_msgs/msg/LaserScan"
+  gz_type_name: "gz.msgs.LaserScan"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/points"
+  gz_topic_name: "/lidar/points"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "gz.msgs.PointCloudPacked"
+  direction: GZ_TO_ROS
+```
+
+```bash
+# Run the bridge from the YAML file
+ros2 run ros_gz_bridge parameter_bridge --ros-args -p config_file:=config/bridge.yaml
+
+# Images are best bridged with ros_gz_image, which supports image_transport
+ros2 run ros_gz_image image_bridge /head_camera/image
+
+# Quick one-off bridge: TOPIC@ROS_TYPE[GZ_TYPE  ([ = Gazebo to ROS, ] = ROS to Gazebo, @ = both)
+ros2 run ros_gz_bridge parameter_bridge /imu@sensor_msgs/msg/Imu[gz.msgs.IMU
+```
+
+Other pairs follow the same pattern, for example `sensor_msgs/msg/CameraInfo` with `gz.msgs.CameraInfo`, and `geometry_msgs/msg/Wrench` with `gz.msgs.Wrench`. Bridging `/clock` is what makes `use_sim_time: True` work. Without it, nodes using simulation time wait forever for a clock that never arrives.
+
+## Consuming Sensor Data in rclpy
+
+Sensor topics are high-rate and loss-tolerant, so subscribe with the **sensor-data QoS profile** (best-effort reliability, small history):
+
+```python
+import math
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Imu, LaserScan
+
+
+class SimSensorMonitor(Node):
+    """Monitors simulated IMU tilt and the nearest LiDAR obstacle."""
+
+    def __init__(self):
+        super().__init__('sim_sensor_monitor')
+        self.create_subscription(Imu, '/imu', self.on_imu, qos_profile_sensor_data)
+        self.create_subscription(LaserScan, '/scan', self.on_scan, qos_profile_sensor_data)
+        self.tilt_limit = math.radians(20.0)
+
+    def on_imu(self, msg: Imu) -> None:
+        a = msg.linear_acceleration
+        roll = math.atan2(a.y, a.z)
+        pitch = math.atan2(-a.x, math.sqrt(a.y ** 2 + a.z ** 2))
+        if abs(roll) > self.tilt_limit or abs(pitch) > self.tilt_limit:
+            self.get_logger().warn(
+                f'Tilt warning: roll={math.degrees(roll):.1f} deg, '
+                f'pitch={math.degrees(pitch):.1f} deg')
+
+    def on_scan(self, msg: LaserScan) -> None:
+        valid = [r for r in msg.ranges if msg.range_min <= r <= msg.range_max]
+        if valid:
+            self.get_logger().info(
+                f'Nearest obstacle: {min(valid):.2f} m', throttle_duration_sec=1.0)
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(SimSensorMonitor())
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+```
+
+Run it with simulation time so its timestamps match the simulator: `ros2 run my_humanoid_sim sim_sensor_monitor --ros-args -p use_sim_time:=true`.
+
+## Visualising in RViz2
+
+RViz2 draws sensor data in 3D, but only if it can transform every message's `frame_id` into the chosen fixed frame. That transform tree comes from `robot_state_publisher` (which needs joint states) plus a transform from the world to the robot base. Start it with `rviz2 --ros-args -p use_sim_time:=true`, then:
+
+1. Set **Fixed Frame** to your robot's base frame (for example `base_link`) to start.
+2. Add a **LaserScan** display on `/scan` and a **PointCloud2** display on `/points`.
+3. Add an **Image** display on `/head_camera/image`, plus **TF** and **RobotModel** displays to confirm frames line up.
+
+If a display shows "No transform from ... to ...", the `gz_frame_id` in the SDF does not match a frame in the TF tree, or joint states are not being published.
+
+## A Note on Unity as a Rendering Alternative
+
+Gazebo's renderer is adequate for most robotics work, but some teams want game-engine visuals — for example, to generate synthetic images for training vision models. **Unity** can be connected to ROS 2 through Unity's open-source **Unity Robotics Hub** projects:
+
+- **ROS-TCP-Connector** — a Unity package that publishes and subscribes to ROS messages from C# scripts
+- **ROS-TCP-Endpoint** — a ROS 2 node that relays those messages over TCP
+- **URDF Importer** — imports a URDF robot as Unity `ArticulationBody` components
+
+On the ROS 2 side you build ROS-TCP-Endpoint from source (its `main-ros2` branch) and run `ros2 run ros_tcp_endpoint default_server_endpoint --ros-args -p ROS_IP:=0.0.0.0`.
+
+Be honest about the trade-offs. Unity uses its own physics (PhysX), so robot dynamics will not match Gazebo's. Messages cross a TCP relay instead of native DDS, and simulation time is not synchronised with ROS 2 automatically. The Unity Robotics repositories have seen limited updates in recent years, so verify compatibility with your Unity and ROS 2 versions before committing a project to them. For GPU-accelerated photorealism tightly integrated with robotics tooling, Module 4 covers **NVIDIA Isaac Sim**, which is the more common choice for that use case today.
+
+## Common Pitfalls
+
+- **No sensor output at all**: the Sensors, Imu, Contact, or ForceTorque system is missing from the world file.
+- **Rendering sensors fail on headless machines**: cameras and GPU LiDAR need a working OpenGL context; on servers you may need a virtual display or EGL setup.
+- **Wrong frame IDs**: without `gz_frame_id`, Gazebo uses a scoped name such as `model::link::sensor`, which does not match your TF tree.
+- **Mismatched bridge types**: a typo in `gz_type_name` makes the bridge create nothing; check with `gz topic -i -t` which type is actually published. Likewise, forgetting to bridge `/clock` stalls every node using `use_sim_time`.
+- **QoS mismatches**: a reliable subscription receives nothing from a best-effort publisher, and ROS 2 only logs a warning. A best-effort subscription such as `qos_profile_sensor_data` is compatible with both, which is why it is the safe default for sensor topics.
+- **Update rates too high**: a 1 kHz camera will crush the achieved real-time factor. Match rates to the real hardware.
+
+## Summary
+
+- Rendering sensors (camera, depth, GPU LiDAR) need the **Sensors** system; IMU, contact, and force-torque need their own systems
+- Every sensor should carry a **noise model** based on real datasheets
+- `ros_gz_bridge` with a **YAML config** maps Gazebo topics and types to ROS 2; always bridge `/clock`
+- Subscribe with **sensor-data QoS** and run nodes with `use_sim_time`
+- RViz2 needs a consistent **TF tree** and matching `gz_frame_id` values
+- **Unity** is a possible rendering alternative, with real trade-offs in physics fidelity, time sync, and maintenance
+
+## What's Next?
+
+In the next chapter, we tackle the hardest part of simulation: making behaviour learned in simulation survive contact with the **real world**.
+
+---
+
+## Exercises
+
+import { Exercise } from '@site/src/components/Exercise';
+
+<Exercise
+  title="Easy: Sensor Simulation Concepts"
+  difficulty="beginner"
+  estimatedTime={10}
+  type="conceptual"
+>
+
+Answer the following questions:
+
+1. Which Gazebo system must be loaded for a `gpu_lidar` sensor, and which for an `imu` sensor?
+2. What is the difference between the `mean`, `stddev`, and `bias_mean` terms in an IMU noise model?
+3. Why does a node with `use_sim_time` enabled appear to hang when `/clock` is not bridged?
+
+</Exercise>
+
+<Exercise
+  title="Medium: Custom Sensor Suite"
+  difficulty="intermediate"
+  estimatedTime={40}
+  type="coding"
+  hint="Add the sensors inside gazebo reference elements in your URDF, then write one bridge.yaml entry per topic. Use gz topic -l to confirm the Gazebo topic names before writing the YAML."
+>
+
+Add an RGB camera, a 2D LiDAR (one vertical sample), and an IMU to the robot from Chapter 3.1:
+
+1. Give each sensor a noise model and a correct `gz_frame_id`
+2. Write a `bridge.yaml` that bridges all three sensors plus `/clock`
+3. Visualise all three in RViz2 with the TF and RobotModel displays enabled
+4. Extend `SimSensorMonitor` to publish a `std_msgs/msg/Bool` on `/obstacle_close` when any LiDAR range is below 0.5 m
+
+</Exercise>
+
+<Exercise
+  title="Challenging: Foot Contact Estimator"
+  difficulty="advanced"
+  estimatedTime={60}
+  type="hands-on"
+  hint="Contact messages are only published while contact exists, so treat a timeout as no contact. For force-torque, a vertical force threshold with hysteresis avoids flickering."
+>
+
+For a biped (or a simple two-legged test model):
+
+1. Add a contact sensor to each foot and a force-torque sensor to each ankle joint
+2. Bridge both to ROS 2 (use `ros_gz_interfaces/msg/Contacts` for contacts)
+3. Write an rclpy node that estimates the **gait phase** (left stance, right stance, double support, flight) from the sensors
+4. Compare the contact-based and force-based estimates while the robot is pushed around with the GUI, and explain any disagreement
+
+</Exercise>

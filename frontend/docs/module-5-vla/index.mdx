@@ -6,18 +6,22 @@ description: Vision-Language-Action Systems for Autonomous Behavior
 
 # Module 5: Vision-Language-Action Systems
 
-This module covers cutting-edge VLA systems that enable autonomous humanoid behavior.
+This module covers Vision-Language-Action (VLA) systems: the models and pipelines that let a humanoid robot see its surroundings, understand spoken instructions, plan multi-step tasks, and act on them safely. It spans weeks 11-13 and ends with the course capstone project.
+
+Throughout the module, one principle recurs: language models propose, and deterministic, tested code verifies and executes. You will learn how VLA models map images and text to actions, how to build a voice-to-ROS 2 pipeline with validation and confirmation, and how to use LLMs as task planners over a skill library with closed-loop replanning.
 
 ## Topics Covered
 
-- Voice-to-action pipelines
-- LLM-based cognitive planning
-- Multi-modal perception
-- Capstone project: Autonomous humanoid behavior
+- VLA model architecture: vision encoders, language backbones, and action heads
+- Voice-to-action pipelines with speech recognition and structured intent parsing
+- LLM-based task planning, plan validation, and replanning
+- Capstone project: a voice-commanded humanoid in simulation
 
 ## Chapters
 
-*Chapters coming soon*
+1. [VLA Architecture](./vla-architecture) (Week 11): how VLA models work, action tokenization vs continuous heads, RT-1, RT-2, OpenVLA, training data, and safety
+2. [Voice-to-Action Pipelines](./voice-to-action) (Week 11): Whisper speech recognition, pydantic command schemas, object grounding, and a complete rclpy pipeline node
+3. [LLM Task Planning](./llm-task-planning) (Weeks 12-13): SayCan, Code-as-Policies, skill libraries, prompt design, plan validation, human-in-the-loop, and the capstone project
 
 ## Prerequisites
 

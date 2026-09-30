@@ -5,7 +5,7 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn src.api.main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: GEMINI_API_KEY
+      - key: GOOGLE_API_KEY
         sync: false
       - key: QDRANT_URL
         sync: false
@@ -15,5 +15,5 @@ services:
         sync: false
       - key: JWT_SECRET_KEY
         generateValue: true
-      - key: ENVIRONMENT
+      - key: APP_ENV
         value: production

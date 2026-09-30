@@ -1,0 +1,379 @@
+---
+sidebar_position: 3
+title: Services, Actions and Parameters
+description: Request/response services, long-running actions and runtime parameters in ROS 2
+keywords: [ros2, services, actions, parameters, rclpy, action-server, yaml]
+# Instructor metadata (T075)
+week: 4
+estimated_time: 100
+difficulty: intermediate
+learning_objectives:
+  - Define service interfaces and implement rclpy service servers and clients
+  - Implement action servers and clients with goals, feedback, results and cancellation
+  - Declare, validate and load node parameters from YAML files
+  - Choose the right communication pattern for a given robot behavior
+prerequisites:
+  - module-2-ros2/01-ros2-architecture
+---
+
+# Services, Actions and Parameters
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Define service interfaces and implement rclpy service servers and clients
+2. Implement action servers and clients with goals, feedback, results and cancellation
+3. Declare, validate and load node parameters from YAML files
+4. Choose the right communication pattern for a given robot behavior
+
+---
+
+## Introduction
+
+Topics are ideal for continuous streams such as joint states and camera frames, but many robot interactions have a different shape:
+
+- "Enable the motors" needs a **yes/no answer**: a **service**.
+- "Walk to the kitchen" takes seconds, should report progress and must be cancellable: an **action**.
+- "Use a step length of 25 cm" is configuration that changes rarely: a **parameter**.
+
+This chapter covers all three. As before, the examples target ROS 2 Humble or Jazzy with `rclpy`. We reuse the `humanoid_interfaces` (ament_cmake) and `humanoid_basics` (ament_python) packages from the previous chapter.
+
+## Services
+
+A service is a named **request/response** endpoint. One server handles requests from any number of clients. Each service type is defined in a `.srv` file with the request above `---` and the response below.
+
+```text
+# humanoid_interfaces/srv/SetJointLimits.srv
+string joint_name
+float64 lower        # radians
+float64 upper        # radians
+---
+bool success
+string message
+```
+
+Register it by adding `"srv/SetJointLimits.srv"` to the `rosidl_generate_interfaces` call in `humanoid_interfaces/CMakeLists.txt`, next to `BalanceState.msg`.
+
+<Tabs>
+  <TabItem value="server" label="Service Server" default>
+
+```python
+# humanoid_basics/humanoid_basics/joint_limit_server.py
+import rclpy
+from rclpy.node import Node
+from humanoid_interfaces.srv import SetJointLimits
+
+class JointLimitServer(Node):
+    def __init__(self):
+        super().__init__('joint_limit_server')
+        self.limits = {'l_knee': (0.0, 2.2), 'r_knee': (0.0, 2.2)}
+        self.srv = self.create_service(
+            SetJointLimits, 'set_joint_limits', self.handle_set_limits)
+
+    def handle_set_limits(self, request, response):
+        response.success = False
+        if request.joint_name not in self.limits:
+            response.message = f'unknown joint {request.joint_name}'
+        elif request.lower >= request.upper:
+            response.message = 'lower must be smaller than upper'
+        else:
+            self.limits[request.joint_name] = (request.lower, request.upper)
+            response.success, response.message = True, 'limits updated'
+        self.get_logger().info(response.message)
+        return response
+
+def main():
+    rclpy.init()
+    rclpy.spin(JointLimitServer())
+    rclpy.shutdown()
+```
+
+  </TabItem>
+  <TabItem value="client" label="Service Client">
+
+```python
+# humanoid_basics/humanoid_basics/joint_limit_client.py
+import sys
+import rclpy
+from rclpy.node import Node
+from humanoid_interfaces.srv import SetJointLimits
+
+def main():
+    rclpy.init()
+    node = Node('joint_limit_client')
+    client = node.create_client(SetJointLimits, 'set_joint_limits')
+    while not client.wait_for_service(timeout_sec=1.0):
+        node.get_logger().info('waiting for set_joint_limits...')
+
+    request = SetJointLimits.Request(
+        joint_name=sys.argv[1], lower=float(sys.argv[2]), upper=float(sys.argv[3]))
+    future = client.call_async(request)          # returns a Future immediately
+    rclpy.spin_until_future_complete(node, future, timeout_sec=5.0)
+    if future.done():
+        result = future.result()
+        node.get_logger().info(f'success={result.success}: {result.message}')
+    else:
+        node.get_logger().error('service call timed out')
+    node.destroy_node()
+    rclpy.shutdown()
+```
+
+  </TabItem>
+</Tabs>
+
+From the CLI, `ros2 service list -t` lists services with their types, and you can call one directly:
+
+```bash
+ros2 service call /set_joint_limits humanoid_interfaces/srv/SetJointLimits \
+  "{joint_name: 'l_knee', lower: 0.05, upper: 2.0}"
+```
+
+For common cases, reuse standard types instead of writing your own: `std_srvs/srv/SetBool` (for example, enable or disable motors) and `std_srvs/srv/Trigger` (for example, "zero the IMU").
+
+## Actions
+
+An **action** is for goals that take time. It is built from three parts: a **goal** the client sends, a stream of **feedback** while it runs, and a final **result**. Clients can also **cancel** a goal. Under the hood an action is a combination of services and topics.
+
+```text
+# humanoid_interfaces/action/WalkTo.action  (goal --- result --- feedback)
+geometry_msgs/Point target        # in the odom frame, metres
+float32 max_speed                 # m/s
+---
+bool reached
+float32 distance_remaining
+---
+float32 distance_remaining
+uint32 steps_taken
+```
+
+Add `"action/WalkTo.action"` to `rosidl_generate_interfaces` and `<depend>action_msgs</depend>` to `package.xml`. The server simulates walking in fixed-length steps:
+
+```python
+# humanoid_basics/humanoid_basics/walk_to_server.py
+import math
+import time
+import rclpy
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+from humanoid_interfaces.action import WalkTo
+
+STEP_LENGTH = 0.2   # metres per step in this simple simulation
+
+class WalkToServer(Node):
+    def __init__(self):
+        super().__init__('walk_to_server')
+        self.x, self.y = 0.0, 0.0
+        self.server = ActionServer(
+            self, WalkTo, 'walk_to', execute_callback=self.execute,
+            goal_callback=self.on_goal, cancel_callback=self.on_cancel,
+            callback_group=ReentrantCallbackGroup())
+
+    def on_goal(self, goal_request):
+        if goal_request.max_speed <= 0.0 or goal_request.max_speed > 1.0:
+            self.get_logger().warn('rejecting goal: unsafe max_speed')
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
+    def on_cancel(self, goal_handle):
+        return CancelResponse.ACCEPT
+
+    def execute(self, goal_handle):
+        target = goal_handle.request.target
+        feedback, steps = WalkTo.Feedback(), 0
+        step_period = STEP_LENGTH / goal_handle.request.max_speed
+        while True:
+            dx, dy = target.x - self.x, target.y - self.y
+            dist = math.hypot(dx, dy)
+            if dist < 0.05:
+                break
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                return WalkTo.Result(reached=False, distance_remaining=dist)
+            step = min(STEP_LENGTH, dist)
+            self.x += step * dx / dist
+            self.y += step * dy / dist
+            steps += 1
+            feedback.distance_remaining, feedback.steps_taken = dist - step, steps
+            goal_handle.publish_feedback(feedback)
+            time.sleep(step_period)   # stands in for executing one real step
+
+        goal_handle.succeed()
+        return WalkTo.Result(reached=True, distance_remaining=0.0)
+
+def main():
+    rclpy.init()
+    executor = MultiThreadedExecutor()
+    executor.add_node(WalkToServer())
+    executor.spin()
+```
+
+The `MultiThreadedExecutor` plus `ReentrantCallbackGroup` matters: while `execute` is running, the executor must still be free to process cancel requests and new goals. The client below sends a goal, prints feedback and waits for the result:
+
+```python
+# humanoid_basics/humanoid_basics/walk_to_client.py
+import rclpy
+from rclpy.action import ActionClient
+from rclpy.node import Node
+from humanoid_interfaces.action import WalkTo
+
+def on_feedback(msg):
+    print(f'{msg.feedback.steps_taken} steps, {msg.feedback.distance_remaining:.2f} m left')
+
+def main():
+    rclpy.init()
+    node = Node('walk_to_client')
+    client = ActionClient(node, WalkTo, 'walk_to')
+    client.wait_for_server()
+    goal = WalkTo.Goal(max_speed=0.4)
+    goal.target.x, goal.target.y = 2.0, 1.0
+    send_future = client.send_goal_async(goal, feedback_callback=on_feedback)
+    rclpy.spin_until_future_complete(node, send_future)   # wait for accept/reject
+
+    goal_handle = send_future.result()
+    if goal_handle.accepted:
+        result_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(node, result_future)
+        print('reached =', result_future.result().result.reached)
+    else:
+        print('goal rejected')
+    node.destroy_node()
+    rclpy.shutdown()
+```
+
+From the CLI: `ros2 action list -t`, `ros2 action info /walk_to`, and `ros2 action send_goal --feedback /walk_to humanoid_interfaces/action/WalkTo "{target: {x: 1.0, y: 0.0}, max_speed: 0.3}"`.
+
+## Parameters
+
+**Parameters** are named, typed configuration values owned by a node. They can be set at startup, changed at runtime, and validated by the node itself.
+
+```python
+# humanoid_basics/humanoid_basics/gait_controller.py
+import rclpy
+from rcl_interfaces.msg import FloatingPointRange, ParameterDescriptor, SetParametersResult
+from rclpy.node import Node
+
+class GaitController(Node):
+    def __init__(self):
+        super().__init__('gait_controller')
+        self.declare_parameter('step_length', 0.25, ParameterDescriptor(
+            description='Forward step length in metres',
+            floating_point_range=[FloatingPointRange(from_value=0.05, to_value=0.4)]))
+        self.declare_parameter('step_height', 0.05)
+        self.declare_parameter('gait', 'walk')
+        self.step_length = self.get_parameter('step_length').value
+        self.add_on_set_parameters_callback(self.on_params)
+
+    def on_params(self, params):
+        for p in params:
+            if p.name == 'gait' and p.value not in ('walk', 'stand', 'march'):
+                return SetParametersResult(successful=False, reason=f'unknown gait {p.value}')
+        for p in params:
+            if p.name == 'step_length':
+                self.step_length = p.value
+                self.get_logger().info(f'step_length is now {p.value}')
+        return SetParametersResult(successful=True)
+
+def main():
+    rclpy.init()
+    rclpy.spin(GaitController())
+    rclpy.shutdown()
+```
+
+The range in the descriptor is enforced by ROS 2 itself; the callback adds custom checks. Store values in a YAML file so each robot can have its own configuration. The top-level key must match the node name, with values nested under `ros__parameters`:
+
+```yaml
+# humanoid_basics/config/gait.yaml
+gait_controller:
+  ros__parameters:
+    step_length: 0.2
+    step_height: 0.04
+    gait: "walk"
+```
+
+```bash
+ros2 run humanoid_basics gait_controller --ros-args --params-file config/gait.yaml
+ros2 param set /gait_controller step_length 0.3     # accepted
+ros2 param set /gait_controller step_length 0.9     # rejected: out of range
+ros2 param dump /gait_controller > my_gait.yaml
+```
+
+## Choosing the Right Pattern
+
+| Pattern | Shape | Duration | Feedback | Cancel | Humanoid example |
+|---------|-------|----------|----------|--------|------------------|
+| **Topic** | Stream, many-to-many | Continuous | n/a | n/a | `/joint_states`, `/imu/data` |
+| **Service** | Request/response | Short (should return quickly) | No | No | Enable motors, set joint limits |
+| **Action** | Goal, feedback, result | Seconds to minutes | Yes | Yes | Walk to a point, grasp a cup |
+| **Parameter** | Named configuration | Read at startup or on change | n/a | n/a | Step length, controller gains |
+
+A useful rule of thumb: if a caller would want to know progress or stop the task midway, it is an action. If it answers immediately, it is a service. If it is data that simply keeps flowing, it is a topic.
+
+## Common Pitfalls
+
+- **Deadlocks from synchronous calls in callbacks.** Calling `client.call()` inside a callback on a single-threaded executor blocks forever, because the executor cannot process the response. Use `call_async()` or a separate callback group with a `MultiThreadedExecutor`.
+- **Long work in a service handler or a single-threaded action server.** A service that takes seconds should be an action, and an action server on a single-threaded executor cannot process cancel requests while `execute` blocks.
+- **Forgetting `goal_handle.succeed()`.** The goal is then reported as aborted even if the result is returned.
+- **Wrong YAML key.** If the top-level key does not match the node name (or `/**` wildcard), parameters are silently ignored.
+- **Undeclared parameters.** By default, `get_parameter` on a name that was never declared raises an exception.
+
+## Summary
+
+- **Services** give quick request/response calls defined by `.srv` files; always use `call_async` in nodes
+- **Actions** handle long-running goals with feedback and cancellation; servers need a multi-threaded executor to accept cancels while executing
+- **Parameters** configure nodes; validate them with descriptors and set-parameter callbacks
+- YAML parameter files keep configuration out of code and per-robot
+- Choose the pattern based on duration, need for feedback, and whether data is continuous
+
+---
+
+## Exercises
+
+import { Exercise } from '@site/src/components/Exercise';
+
+<Exercise
+  title="Easy: Pick the Pattern"
+  difficulty="beginner"
+  estimatedTime={15}
+  type="conceptual"
+>
+
+For each behavior, choose topic, service, action or parameter and justify your choice:
+1. Streaming foot force-sensor readings at 500 Hz
+2. Asking the robot for its current battery percentage once
+3. Picking up a cup from a table
+4. Setting the maximum walking speed allowed in a crowded room
+5. Resetting the odometry to zero
+
+</Exercise>
+
+<Exercise
+  title="Medium: Motor Enable Service"
+  difficulty="intermediate"
+  estimatedTime={30}
+  type="coding"
+  hint="std_srvs/srv/SetBool has a bool data field in the request, and success plus message in the response."
+>
+
+Write a node that offers `/enable_motors` using `std_srvs/srv/SetBool`. While motors are disabled, the node should ignore incoming messages on `/joint_commands`. Add a parameter `require_confirmation` (bool); when true, enabling fails unless a second parameter `operator_id` is non-empty. Test entirely from the CLI with `ros2 service call` and `ros2 param set`.
+
+</Exercise>
+
+<Exercise
+  title="Challenging: Grasp Action with Preemption"
+  difficulty="advanced"
+  estimatedTime={60}
+  type="hands-on"
+  hint="Model the grasp as phases (approach, close gripper, lift) and publish the phase name in feedback. Handle a new goal arriving by aborting the current one inside the goal callback logic."
+>
+
+Define `Grasp.action` with a goal containing an object name and a target pose, feedback containing the current phase and progress (0 to 1), and a result with a success flag and final gripper width. Implement an action server that rejects goals whose target is farther than 0.7 m from the shoulder and opens the gripper before reporting a cancel, plus a client that cancels the goal if progress stalls for more than 3 seconds.
+
+Record a log showing a successful, a rejected and a canceled grasp.
+
+</Exercise>

@@ -1,0 +1,375 @@
+---
+sidebar_position: 4
+title: Navigation and Locomotion
+description: Nav2 path planning for humanoids, bipedal gait fundamentals, ZMP and LIPM balance models, RL locomotion in Isaac Lab, and obstacle avoidance
+keywords: [nav2, navigation, bipedal-locomotion, zmp, lipm, capture-point, isaac-lab, reinforcement-learning, obstacle-avoidance]
+# Instructor metadata (T075)
+week: 10
+estimated_time: 85
+difficulty: advanced
+learning_objectives:
+  - Configure Nav2 behavior trees, costmaps, planners, and controllers for a humanoid
+  - Send navigation goals programmatically with rclpy
+  - Explain gait phases and the ZMP and LIPM models of bipedal balance
+  - Describe how reinforcement learning policies for locomotion are trained in Isaac Lab
+  - Implement layered obstacle avoidance for a walking robot
+prerequisites:
+  - module-4-isaac/01-isaac-sim-and-usd
+  - module-4-isaac/02-isaac-ros-perception
+---
+
+# Navigation and Bipedal Locomotion
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Configure Nav2 behavior trees, costmaps, planners, and controllers for a humanoid
+2. Send navigation goals programmatically with `rclpy`
+3. Explain gait phases and the ZMP and LIPM models of bipedal balance
+4. Describe how reinforcement learning policies for locomotion are trained in Isaac Lab
+5. Implement layered obstacle avoidance for a walking robot
+
+---
+
+## Introduction
+
+The previous chapter gave the robot a pose estimate and a map. Navigation is the next layer: choosing a path to a goal and following it safely. For wheeled robots this is well understood, and **Nav2** is the standard ROS 2 solution. Humanoids add a layer underneath: every velocity command from Nav2 must become **footsteps**, and every footstep must keep the robot balanced.
+
+:::caution Version assumption
+Nav2 examples assume **ROS 2 Humble**. Plugin naming changed in later distributions (some planner plugins switched from `package/Class` to `package::Class`), and parameters are added between releases. Check the Nav2 documentation for your distribution.
+:::
+
+## Nav2 Architecture
+
+Nav2 is a set of lifecycle-managed servers coordinated by a **behavior tree** (BT). For a humanoid, its `cmd_vel` output feeds a locomotion controller rather than wheel motors.
+
+- The **planner server** computes a global path on the **global costmap**.
+- The **controller server** follows that path at a fixed rate using the **local costmap**, producing velocity commands.
+- The **behavior server** provides recoveries such as spinning or backing up.
+- The **BT navigator** ties these together; the default tree replans periodically and triggers recoveries on failure.
+
+**Costmaps** are 2D grids where each cell holds a traversal cost, assembled from layers: a *static* layer from a saved map, *obstacle* and *voxel* layers from live laser or point-cloud data, and an *inflation* layer that adds a cost gradient around obstacles. With Isaac ROS, nvblox can also supply a costmap layer built from its ESDF (Chapter 2).
+
+### Planners and Controllers
+
+| Plugin | Type | Strengths | Considerations |
+|--------|------|-----------|----------------|
+| NavFn | Global planner | Simple, robust grid search | Ignores robot kinematics |
+| Smac 2D | Global planner | Cost-aware grid search, good default | Ignores heading constraints |
+| Smac Hybrid-A* / Lattice | Global planner | Kinematically feasible paths | More tuning, more compute |
+| DWB | Controller | Highly configurable trajectory scoring | Many critics to tune |
+| Regulated Pure Pursuit | Controller | Smooth path tracking, easy to tune | Limited dynamic obstacle handling |
+| MPPI | Controller | Sampling-based predictive control, supports omnidirectional motion | Heavier compute; tune critics carefully |
+
+### Parameters for a Humanoid
+
+The YAML below is an excerpt, not a full Nav2 configuration. Values are **illustrative starting points**; tune them against your robot's measured locomotion limits.
+
+```yaml
+controller_server:
+  ros__parameters:
+    controller_frequency: 20.0
+    controller_plugins: ["FollowPath"]
+    FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"
+      motion_model: "Omni"        # humanoids can side-step
+      vx_max: 0.4                 # keep below what the gait controller tracks well
+      vx_min: -0.15               # walking backwards is slow and risky
+      vy_max: 0.15
+      wz_max: 0.5
+      critics: ["ConstraintCritic", "ObstaclesCritic", "GoalCritic", "GoalAngleCritic",
+                "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic"]
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 4
+      height: 4
+      resolution: 0.05
+      robot_radius: 0.35          # circle enclosing the swaying torso and feet
+      plugins: ["voxel_layer", "inflation_layer"]
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        z_resolution: 0.12
+        z_voxels: 16              # 16 x 0.12 m covers roughly head height
+        max_obstacle_height: 1.9
+        observation_sources: head_depth
+        head_depth:
+          topic: /head_camera/depth/points
+          data_type: "PointCloud2"
+          min_obstacle_height: 0.05
+          max_obstacle_height: 1.9
+          marking: true
+          clearing: true
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.6
+        cost_scaling_factor: 3.0
+```
+
+### Sending a Goal
+
+<Tabs>
+  <TabItem value="action" label="rclpy action client" default>
+    The `NavigateToPose` action gives full control over feedback and cancellation.
+
+    ```python
+    import math
+    import rclpy
+    from rclpy.action import ActionClient
+    from rclpy.node import Node
+    from nav2_msgs.action import NavigateToPose
+
+    def main(x: float = 3.0, y: float = 1.5, yaw: float = 1.57):
+        rclpy.init()
+        node = Node("goal_sender")
+        client = ActionClient(node, NavigateToPose, "navigate_to_pose")
+
+        goal = NavigateToPose.Goal()
+        goal.pose.header.frame_id = "map"
+        goal.pose.header.stamp = node.get_clock().now().to_msg()
+        goal.pose.pose.position.x, goal.pose.pose.position.y = x, y
+        goal.pose.pose.orientation.z = math.sin(yaw / 2.0)   # yaw-only quaternion
+        goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
+
+        client.wait_for_server()
+        send_future = client.send_goal_async(
+            goal, feedback_callback=lambda m: node.get_logger().info(
+                f"Remaining: {m.feedback.distance_remaining:.2f} m"))
+        rclpy.spin_until_future_complete(node, send_future)
+
+        handle = send_future.result()
+        if not handle.accepted:
+            node.get_logger().error("Goal rejected")
+            return
+        result_future = handle.get_result_async()
+        rclpy.spin_until_future_complete(node, result_future)
+        node.get_logger().info(f"Finished with status {result_future.result().status}")
+    ```
+  </TabItem>
+  <TabItem value="cli" label="Command line">
+    For quick tests, send the same goal from a terminal with feedback enabled.
+
+    ```bash
+    ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
+      "{pose: {header: {frame_id: map}, pose: {position: {x: 3.0, y: 1.5}, orientation: {w: 1.0}}}}" \
+      --feedback
+    ```
+
+    For scripted sequences of goals, `nav2_simple_commander` offers a blocking `BasicNavigator` API with methods such as `goToPose` and `isTaskComplete`.
+  </TabItem>
+</Tabs>
+
+## Humanoid-Specific Considerations
+
+Nav2 treats the robot as a body that accepts velocity commands. A humanoid satisfies that interface only through a **locomotion controller** that converts each `Twist` into footsteps and joint targets.
+
+| Aspect | Wheeled base | Humanoid |
+|--------|--------------|----------|
+| **Footprint** | Fixed, rigid polygon | Changes every step; torso sways side to side |
+| **Velocity tracking** | Nearly immediate | Delayed by the step cycle |
+| **Lateral motion** | Only on holonomic bases | Possible by side-stepping, usually slower than forward |
+| **Stopping** | Brake in place | Needs one or more steps to come to rest |
+| **Failure mode** | Collision | Collision or fall |
+
+Practical consequences for Nav2 configuration:
+
+- Use a **circular footprint** enclosing the full sway envelope, and velocity limits the gait controller can actually track.
+- Prefer controllers that support **omnidirectional motion** (such as MPPI with an omni model) so the robot can side-step in tight spaces.
+- Standard 2D Nav2 does **not** plan footsteps or stairs. That needs a footstep planner or a terrain-aware learned policy below Nav2.
+
+## Bipedal Locomotion Basics
+
+Each leg alternates between **stance** (foot on the ground, bearing weight) and **swing** (foot moving forward). The whole-body gait alternates between **double support**, when both feet are down and weight shifts to the leading foot, and **single support**, when one foot swings. **Heel strike** and **toe off** are the events that bound these phases.
+
+### Balance: ZMP and the Inverted Pendulum
+
+The **Zero Moment Point (ZMP)** is the point on the ground where the net moment of the contact forces has no horizontal component. For a flat-footed robot, a common stability criterion is that the ZMP must stay inside the **support polygon**, the convex hull of the feet in contact. If balance would require the ZMP outside that polygon, the foot starts to tip.
+
+The **Linear Inverted Pendulum Model (LIPM)** reduces the robot to a point mass at constant height `z_c` balanced on a massless leg. Its horizontal dynamics are linear: `x_ddot = omega^2 * (x - p)`, with `omega = sqrt(g / z_c)`. Here `x` is the center of mass (CoM) position and `p` is the ZMP. The **capture point** `xi = x + x_dot / omega` is where the robot must step to come to rest. Centroidal models extend these ideas to the robot's full linear and angular momentum, but the LIPM captures the core intuition, and its linearity is why LIPM planners are fast enough for real-time replanning. The script below walks a LIPM forward using a capture-point stepping rule.
+
+```python
+import numpy as np
+
+G = 9.81
+
+def lipm_step(x0: float, v0: float, p: float, t: np.ndarray, omega: float):
+    """Closed-form LIPM solution with the ZMP fixed at p."""
+    dx = x0 - p
+    x = p + dx * np.cosh(omega * t) + (v0 / omega) * np.sinh(omega * t)
+    v = dx * omega * np.sinh(omega * t) + v0 * np.cosh(omega * t)
+    return x, v
+
+def simulate_walk(step_length=0.3, step_time=0.5, z_c=0.9, n_steps=8, dt=0.01):
+    omega = np.sqrt(G / z_c)
+    # Offset between capture point and stance foot for a periodic gait
+    b = step_length / (np.exp(omega * step_time) - 1.0)
+
+    p = -b              # first stance foot slightly behind the CoM
+    x, v = 0.0, 0.0     # start at rest; initial capture point = 0
+    t = np.arange(0.0, step_time + 1e-9, dt)
+    log = []
+
+    for k in range(n_steps):
+        xs, vs = lipm_step(x, v, p, t, omega)
+        log.extend(zip(k * step_time + t, xs, vs, [p] * len(t)))
+        x, v = xs[-1], vs[-1]
+        xi = x + v / omega          # capture point at end of step
+        p = xi - b                  # place next foot to keep a periodic gait
+
+    return np.array(log)
+
+if __name__ == "__main__":
+    log = simulate_walk()
+    for time, x, v, p in log[::25]:
+        print(f"t={time:4.2f}s  CoM={x:5.2f} m  vel={v:4.2f} m/s  foot/ZMP={p:5.2f} m")
+    print(f"Average speed: {(log[-1, 1] - log[0, 1]) / log[-1, 0]:.2f} m/s (target 0.60)")
+```
+
+The CoM speeds up and slows down over each stance foot while footholds land every `step_length`. After the first step each step covers the target distance in `step_time`; the printed average is a little below target because the robot starts from rest. Real controllers add a finite foot (so the ZMP can move within the sole), lateral dynamics, swing-leg trajectories, and whole-body control to track the CoM plan with real joints.
+
+## RL-Trained Locomotion in Isaac Lab
+
+An increasingly common alternative to hand-designed balance controllers is a neural network **policy** trained with reinforcement learning in simulation. **Isaac Lab**, built on Isaac Sim, is NVIDIA's framework for this, running many robot copies in parallel on the GPU. A typical velocity-tracking task is defined by:
+
+| Component | Typical contents |
+|-----------|------------------|
+| **Observations** | Base angular velocity, projected gravity, velocity command, joint positions and velocities, previous action |
+| **Actions** | Offsets to joint position targets, tracked by low-level PD controllers |
+| **Rewards** | Track commanded velocity; penalize torque, joint acceleration, action changes, falls; reward adequate foot air time |
+| **Randomization** | Friction, payload mass, motor strength, external pushes, sensor noise |
+| **Curriculum** | Terrain difficulty that increases as the policy improves |
+
+Isaac Lab ships example humanoid velocity tasks and training scripts for libraries such as RSL-RL. Script locations and task names change between releases, so treat this as the shape of the command rather than an exact path:
+
+```bash
+# From the Isaac Lab repository root (check the docs for your release's paths)
+./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
+    --task Isaac-Velocity-Rough-H1-v0 --headless
+```
+
+The trained policy fits under Nav2 naturally: Nav2's `cmd_vel` becomes the policy's velocity command. Moving to hardware (**sim-to-real**) depends heavily on randomization, accurate actuator models, and careful safety testing.
+
+## Obstacle Avoidance
+
+Robust avoidance for a humanoid is **layered**, each layer acting on a shorter time horizon:
+
+1. **Global planning** routes around mapped obstacles.
+2. **Local control** (MPPI, DWB) steers around obstacles in the local costmap.
+3. **Collision monitoring** slows or stops the robot when something enters a safety zone; Nav2 provides `nav2_collision_monitor` for this.
+4. **Reactive balance** in the locomotion controller handles contacts and pushes.
+
+A minimal reactive speed limiter placed between Nav2 and the locomotion controller illustrates layer 3:
+
+```python
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import Twist
+from sensor_msgs.msg import LaserScan
+
+class SpeedLimiter(Node):
+    # Scale forward speed down as obstacles ahead get closer
+    def __init__(self, stop_dist=0.5, slow_dist=1.2, fov_deg=60.0):
+        super().__init__("speed_limiter")
+        self.stop_dist, self.slow_dist = stop_dist, slow_dist
+        self.half_fov = np.deg2rad(fov_deg) / 2.0
+        self.min_front = float("inf")
+        self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
+        self.create_subscription(LaserScan, "/scan", self.on_scan, 10)
+        self.create_subscription(Twist, "/cmd_vel_nav", self.on_cmd, 10)
+
+    def on_scan(self, scan: LaserScan) -> None:
+        angles = scan.angle_min + np.arange(len(scan.ranges)) * scan.angle_increment
+        ranges = np.asarray(scan.ranges)
+        front = (np.abs(angles) < self.half_fov) & np.isfinite(ranges)
+        self.min_front = float(ranges[front].min()) if front.any() else float("inf")
+
+    def on_cmd(self, cmd: Twist) -> None:
+        span = self.slow_dist - self.stop_dist
+        scale = np.clip((self.min_front - self.stop_dist) / span, 0.0, 1.0)
+        if cmd.linear.x > 0.0:
+            cmd.linear.x *= scale
+        self.pub.publish(cmd)
+```
+
+Remap Nav2's controller output to `/cmd_vel_nav` so this node sits in the path. A humanoid needs distance to stop, so `stop_dist` must cover the steps required to come to rest.
+
+## Common Pitfalls
+
+- **Footprint too small.** The standing footprint ignores torso sway, causing shoulder and arm collisions in doorways.
+- **Velocity limits above what the gait tracks.** Nav2 assumes commands are executed; if the walker lags, the controller oscillates. Measure tracking in simulation first.
+- **Obstacles only at ankle height.** A 2D laser at foot level misses tables and shelves. Use voxel or nvblox layers covering the robot's full height.
+- **Mixed TF ownership.** VSLAM, leg odometry, and Nav2 must agree on who publishes the `map`, `odom`, and `base_link` transforms.
+- **Deploying RL policies without safety layers.** Always keep an independent stop mechanism and collision monitor around a learned policy.
+
+## Summary
+
+- **Nav2** coordinates planner, controller, and behavior servers with a behavior tree, using layered costmaps
+- Humanoids need **conservative limits, a sway-aware footprint**, and a locomotion controller that turns `cmd_vel` into footsteps
+- Walking alternates **single and double support**; balance is reasoned about with the **ZMP**, **LIPM**, and **capture point**
+- **Isaac Lab** trains locomotion policies with RL in parallel simulation, using rewards, randomization, and curricula
+- **Obstacle avoidance** is layered: global planning, local control, collision monitoring, and reactive balance
+
+---
+
+## Exercises
+
+import { Exercise } from '@site/src/components/Exercise';
+
+<Exercise
+  title="Concept Check: Navigation and Balance"
+  difficulty="beginner"
+  estimatedTime={15}
+  type="conceptual"
+>
+
+Answer the following questions:
+
+1. What are the roles of the planner server, controller server, and behavior server in Nav2?
+2. Why should a humanoid's Nav2 footprint be larger than its standing footprint?
+3. In the LIPM, what happens to the CoM if the ZMP is placed exactly at the capture point?
+
+</Exercise>
+
+<Exercise
+  title="Coding: Extend the LIPM Walker"
+  difficulty="intermediate"
+  estimatedTime={45}
+  type="coding"
+  hint="Model the push as an instantaneous change in CoM velocity at a chosen time, then let the capture-point rule choose the next foothold."
+>
+
+Extend `simulate_walk` to:
+
+1. Add a lateral (y) axis with alternating left and right footholds
+2. Apply a forward push partway through the walk
+3. Clamp step length to a maximum and report whether the robot can still recover
+4. Plot CoM, capture point, and footholds over time for both axes
+
+</Exercise>
+
+<Exercise
+  title="Hands-on Lab: Humanoid Navigation in Isaac Sim"
+  difficulty="advanced"
+  estimatedTime={150}
+  type="hands-on"
+  hint="Start with a simple velocity-to-base-motion shim so Nav2 can be tuned before a real walking controller is in the loop, then swap in the walking controller or an RL policy."
+>
+
+Build an end-to-end navigation demo:
+
+1. Load a humanoid into an Isaac Sim warehouse with shelves and a table
+2. Publish head camera, IMU, and clock over the ROS 2 bridge and run the VSLAM pipeline from Chapter 2
+3. Configure Nav2 with a voxel or nvblox costmap covering the robot's full height
+4. Insert the speed limiter from this chapter between Nav2 and the locomotion controller
+5. Send a sequence of three goals from a Python script and record success, time taken, and any near-collisions, then report which parameters mattered most
+
+</Exercise>

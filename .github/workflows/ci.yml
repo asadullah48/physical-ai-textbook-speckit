@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Tests (no network - Gemini, Qdrant and Postgres are faked)
+        run: pytest -q
+      - name: Ingestion parses the whole book
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost/ci
+          QDRANT_URL: http://localhost:6333
+          QDRANT_API_KEY: ci
+          GOOGLE_API_KEY: ci
+          JWT_SECRET_KEY: ci-secret
+        run: python -m src.scripts.ingest.ingest_content --docs-path ../frontend/docs --dry-run
+
+  frontend:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # publish the built site to the gh-pages branch
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - name: Retrieval tests against the real book index
+        run: npm test
+      - name: Build (fails on broken links)
+        run: npm run build
+      - name: Deploy to GitHub Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: frontend/build
+          publish_branch: gh-pages
+          commit_message: "deploy: ${{ github.sha }}"

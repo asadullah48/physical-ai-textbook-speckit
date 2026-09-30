@@ -1,0 +1,372 @@
+---
+sidebar_position: 4
+title: LLM Task Planning
+description: Using large language models to decompose tasks into validated skill sequences, with closed-loop replanning and the Module 5 capstone project
+keywords: [llm-planning, saycan, code-as-policies, task-decomposition, skill-library, prompt-engineering, replanning, capstone]
+# Instructor metadata (T075)
+week: 12
+estimated_time: 90
+difficulty: advanced
+learning_objectives:
+  - Explain the SayCan and Code-as-Policies approaches to LLM-based robot planning
+  - Decompose natural-language tasks into sequences of skills from a defined skill library
+  - Design robotics prompts with skill descriptions, JSON output, and few-shot examples
+  - Validate LLM plans with schema checks, precondition checks, and simulation dry-runs before execution
+  - Build a closed-loop planner that replans on failure and escalates to a human when needed
+prerequisites:
+  - module-5-vla/01-vla-architecture
+  - module-5-vla/02-voice-to-action
+---
+
+# LLM Task Planning
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Explain the SayCan and Code-as-Policies approaches to LLM-based robot planning
+2. Decompose natural-language tasks into sequences of skills from a defined skill library
+3. Design robotics prompts with skill descriptions, JSON output, and few-shot examples
+4. Validate LLM plans with schema checks, precondition checks, and simulation dry-runs before execution
+5. Build a closed-loop planner that replans on failure and escalates to a human when needed
+
+---
+
+## Introduction
+
+The voice pipeline in the previous chapter handled single commands such as "go to the kitchen". Real requests are longer: "I spilled my drink, can you help?" implies finding a sponge, carrying it to the spill, and perhaps alerting a person. Large language models are good at this kind of **commonsense decomposition**, but they know nothing about what a particular robot can actually do, where objects are, or whether an action is physically possible.
+
+The central idea of this chapter is a division of labor: the **LLM proposes**, while **deterministic code verifies and executes**. The LLM only chooses among skills we have implemented and tested; it never generates motor commands directly.
+
+:::note Key Insight
+Treat an LLM planner like a creative but unreliable junior colleague: useful ideas, no authority. Every plan it produces is a proposal that must pass validation before the robot moves.
+:::
+
+## Two Foundational Ideas
+
+### SayCan (2022)
+
+SayCan, from Google and Everyday Robots ("Do As I Can, Not As I Say"), combined two scores for each candidate skill at each step:
+
+- **Say**: how useful the language model thinks the skill is for the instruction
+- **Can**: how likely the skill is to succeed from the current state, estimated by a learned value function (an **affordance**)
+
+The robot executes the skill with the highest combined score, then repeats. The language model supplies task knowledge; the affordance model grounds it in what is feasible right now.
+
+```python
+import math
+
+def saycan_step(instruction, history, skills, llm_score, affordance):
+    """Pick the next skill by combining LLM usefulness with feasibility."""
+    best, best_score = None, float("-inf")
+    for skill in skills:
+        say = llm_score(instruction, history, skill.description)  # log-likelihood
+        can = affordance(skill)                                     # 0..1 success estimate
+        score = say + math.log(max(can, 1e-6))
+        if score > best_score:
+            best, best_score = skill, score
+    return best
+```
+
+### Code-as-Policies (2022)
+
+Code-as-Policies, also from Google, asked the LLM to write **Python code** that calls perception and control APIs. Loops, conditionals, and arithmetic come for free ("stack all the blocks in order of size"). The trade-off is that executing generated code is powerful and dangerous: it must run in a sandbox that exposes only approved functions.
+
+| Approach | LLM output | Grounding | Strengths | Risks |
+|----------|-----------|-----------|-----------|-------|
+| **SayCan** | Scores over a fixed skill set | Learned affordance values | Always selects a real skill | Needs affordance models; one step at a time |
+| **Code-as-Policies** | Python program | Perception API calls in code | Expressive: loops, math, spatial logic | Arbitrary code execution; hard to verify |
+| **Structured JSON plan** (this chapter) | List of skill calls with arguments | Validator + world model | Easy to check, log, and approve | Less expressive than code |
+| **End-to-end VLA** (chapter 1) | Low-level actions | Learned from demonstrations | Handles contact-rich skills | No explicit plan to inspect |
+
+## Building a Skill Library
+
+A **skill** is a tested, parameterized behavior with explicit preconditions and effects. The library is the planner's entire vocabulary.
+
+```python
+from dataclasses import dataclass, field
+from typing import Callable
+
+@dataclass
+class WorldState:
+    robot_at: str = "charging_dock"
+    holding: str | None = None
+    object_locations: dict[str, str] = field(default_factory=dict)
+    known_places: set[str] = field(default_factory=set)
+
+@dataclass
+class Skill:
+    name: str
+    description: str
+    params: dict[str, str]                                # param name -> type description
+    precondition: Callable[[WorldState, dict], str | None]  # None if OK, else reason
+    effect: Callable[[WorldState, dict], None]            # symbolic update for dry-runs
+
+def pre_navigate(s, a):
+    return None if a["place"] in s.known_places else f"unknown place {a['place']}"
+
+def pre_pick(s, a):
+    if s.holding:
+        return f"already holding {s.holding}"
+    if s.object_locations.get(a["object"]) != s.robot_at:
+        return f"{a['object']} is not at {s.robot_at}"
+    return None
+
+def pre_place(s, a):
+    return None if s.holding == a["object"] else f"not holding {a['object']}"
+
+SKILLS = {
+    "navigate_to": Skill("navigate_to", "Walk to a named place.", {"place": "named place"},
+                         pre_navigate, lambda s, a: setattr(s, "robot_at", a["place"])),
+    "pick": Skill("pick", "Pick up an object at the robot's current place.",
+                  {"object": "object id"}, pre_pick,
+                  lambda s, a: (setattr(s, "holding", a["object"]),
+                                s.object_locations.pop(a["object"], None))),
+    "place": Skill("place", "Put the held object down at the current place.",
+                   {"object": "object id"}, pre_place,
+                   lambda s, a: (s.object_locations.__setitem__(a["object"], s.robot_at),
+                                 setattr(s, "holding", None))),
+    "ask_human": Skill("ask_human", "Ask the user a question and wait for the answer.",
+                       {"question": "text"}, lambda s, a: None, lambda s, a: None),
+}
+```
+
+## Prompt Design for Robotics
+
+A robotics prompt has three jobs: describe the available skills precisely, fix the output format, and show examples of good behavior, including refusing or asking when unsure.
+
+<Tabs>
+<TabItem value="system" label="Skill Descriptions" default>
+
+```python
+import json
+
+def build_system_prompt(skills: dict, state: WorldState) -> str:
+    skill_docs = "\n".join(
+        f"- {s.name}({', '.join(f'{k}: {v}' for k, v in s.params.items())}): {s.description}"
+        for s in skills.values()
+    )
+    return (
+        "You are the task planner for a humanoid robot. You may ONLY use these skills:\n"
+        f"{skill_docs}\n\n"
+        f"Current world state:\n{json.dumps(state.__dict__, default=list, indent=2)}\n\n"
+        "Rules: use only listed skills and known places/objects; never invent objects; "
+        "if the request is unsafe, impossible, or ambiguous, return a plan with a single "
+        "ask_human step. Respond with JSON only."
+    )
+```
+
+</TabItem>
+<TabItem value="schema" label="JSON Output Schema">
+
+```python
+from pydantic import BaseModel, Field
+
+class PlanStep(BaseModel):
+    skill: str
+    args: dict[str, str] = Field(default_factory=dict)
+
+class Plan(BaseModel):
+    reasoning: str = Field(description="One or two sentences explaining the plan")
+    steps: list[PlanStep] = Field(min_length=1, max_length=12)
+
+OUTPUT_INSTRUCTIONS = "Output must validate against:\n" + json.dumps(Plan.model_json_schema())
+```
+
+</TabItem>
+<TabItem value="fewshot" label="Few-Shot Examples">
+
+```python
+FEW_SHOT = [
+    {"role": "user", "content": "Bring the mug from the kitchen to the table."},
+    {"role": "assistant", "content": json.dumps({
+        "reasoning": "Go to the mug, pick it up, carry it to the table, put it down.",
+        "steps": [
+            {"skill": "navigate_to", "args": {"place": "kitchen"}},
+            {"skill": "pick", "args": {"object": "mug"}},
+            {"skill": "navigate_to", "args": {"place": "table"}},
+            {"skill": "place", "args": {"object": "mug"}}]})},
+    {"role": "user", "content": "Throw the knife to me."},
+    {"role": "assistant", "content": json.dumps({
+        "reasoning": "Throwing a sharp object is unsafe; offer a safe alternative.",
+        "steps": [{"skill": "ask_human",
+                   "args": {"question": "I can't throw a knife. Shall I place it on the table near you?"}}]})},
+]
+```
+
+</TabItem>
+</Tabs>
+
+Include a negative example like the knife request: models imitate examples far more reliably than they follow abstract rules.
+
+## Validating Plans Before Execution
+
+Validation runs in three layers, cheapest first. A plan that fails any layer is never executed; the failure reason is fed back to the LLM or shown to the user.
+
+```python
+import copy
+from typing import Protocol
+from pydantic import ValidationError
+
+class LLMClient(Protocol):          # pluggable: any provider or a local model
+    def chat(self, messages: list[dict]) -> str: ...
+
+def validate_plan(raw: str, state: WorldState, simulator=None) -> tuple[Plan | None, str | None]:
+    # 1. Schema check
+    try:
+        plan = Plan.model_validate_json(raw)
+    except ValidationError as e:
+        return None, f"invalid JSON plan: {e.errors()[0]['msg']}"
+    # 2. Symbolic precondition check on a copy of the world state
+    sim_state = copy.deepcopy(state)
+    for i, step in enumerate(plan.steps):
+        skill = SKILLS.get(step.skill)
+        if skill is None:
+            return None, f"step {i}: unknown skill '{step.skill}'"
+        if set(step.args) != set(skill.params):
+            return None, f"step {i}: expected args {sorted(skill.params)}"
+        reason = skill.precondition(sim_state, step.args)
+        if reason:
+            return None, f"step {i} ({step.skill}): {reason}"
+        skill.effect(sim_state, step.args)
+    # 3. Optional physics dry-run in Gazebo / Isaac Sim
+    if simulator is not None:
+        ok, detail = simulator.dry_run(plan)
+        if not ok:
+            return None, f"simulation dry-run failed: {detail}"
+    return plan, None
+```
+
+The symbolic check catches most LLM mistakes, such as picking an object the robot is not next to, in microseconds. The physics dry-run catches problems the symbolic model cannot see, such as an unreachable shelf, but costs seconds to minutes.
+
+## Human-in-the-Loop and Closed-Loop Replanning
+
+Execution is where the world pushes back: a door is closed, a grasp slips. A **closed-loop** planner observes each step's outcome, updates the world state, and replans from the current state on failure. After a bounded number of attempts it stops and asks a human.
+
+```python
+def plan_and_execute(llm: LLMClient, instruction: str, state: WorldState,
+                     executor, approve, max_replans: int = 3) -> bool:
+    feedback = ""
+    for attempt in range(max_replans + 1):
+        messages = [{"role": "system", "content": build_system_prompt(SKILLS, state)
+                     + "\n" + OUTPUT_INSTRUCTIONS}, *FEW_SHOT,
+                    {"role": "user", "content": instruction + feedback}]
+        plan, error = validate_plan(llm.chat(messages), state)
+        if error:
+            feedback = f"\nYour previous plan was rejected: {error}. Fix it."
+            continue
+        if not approve(plan):                      # human reviews the whole plan
+            return False
+        for step in plan.steps:
+            result = executor.run(step)            # calls the ROS 2 action for the skill
+            state = executor.observe_state()       # refresh from perception, not assumptions
+            if not result.success:
+                feedback = (f"\nStep {step.skill}{step.args} failed: {result.message}. "
+                            "Replan from the current state.")
+                break
+        else:
+            return True
+    executor.run(PlanStep(skill="ask_human",
+                          args={"question": f"I could not complete: {instruction}. Can you help?"}))
+    return False
+```
+
+Where should the human be involved? A useful rule is to require approval for any plan that picks up objects, opens doors, or enters rooms with people, and to allow pure navigation between known safe places without approval. The approval step should display the plan in plain language, not raw JSON.
+
+:::caution Enforcement Lives in Code
+The validator, the skill whitelist, and the emergency stop must live in code the LLM cannot modify. Prompt instructions are guidance; code is enforcement.
+:::
+
+## Common Pitfalls
+
+- **Letting the model invent skills or objects**: always check names against the library and the world model.
+- **Validating against an imagined state**: refresh the world state from perception after each step.
+- **Unbounded replanning**: an LLM can loop forever on an impossible task; cap attempts and escalate.
+- **Oversized prompts**: dumping the whole map and every object into the prompt increases latency and confusion. Include only what is relevant.
+- **Assuming determinism**: the same prompt can yield different plans. Log every prompt, response, and validation result for debugging.
+- **Hard-coding one provider**: keep the `LLMClient` interface so you can switch to a local model when offline.
+
+## Summary
+
+- **SayCan** combines LLM usefulness with learned feasibility; **Code-as-Policies** has the LLM write API-calling code
+- A **skill library** with preconditions and effects is the planner's vocabulary and the basis for verification
+- Good robotics prompts contain **skill descriptions, a strict JSON schema, and few-shot examples** including refusals
+- Plans pass **schema, precondition, and simulation** checks before execution
+- **Closed-loop replanning** with bounded retries and **human approval** makes LLM planning safe enough for supervised use
+
+## Capstone Project: Voice-Commanded Humanoid in Simulation
+
+The week-13 capstone integrates the whole course. Each team builds a simulated humanoid that accepts a spoken household request, plans a multi-step task, and executes it safely.
+
+**Required components:**
+
+- **Module 2 (ROS 2)**: nodes, topics, and action servers for every skill
+- **Module 3 (Simulation)**: a household environment in Gazebo with at least two rooms and several manipulable objects
+- **Module 4 (Isaac)**: Isaac Sim or Isaac ROS for perception, synthetic data, or navigation
+- **Module 5 (VLA)**: the voice pipeline from chapter 2 and the LLM planner from this chapter, with an optional learned skill from chapter 1
+
+**Milestones:**
+
+1. **Week 11**: speech recognition and intent parsing working from recorded audio; skill library interface defined
+2. **Week 12, first half**: navigation and one manipulation skill running as ROS 2 actions in simulation
+3. **Week 12, second half**: LLM planner with validation and replanning integrated end to end
+4. **Week 13**: demonstration of three scripted and two unscripted requests, followed by a presentation
+
+| Criterion | Weight | Excellent | Adequate | Insufficient |
+|-----------|--------|-----------|----------|--------------|
+| **System integration** | 25% | All modules connected through clean ROS 2 interfaces | Works end to end with manual steps | Components run only in isolation |
+| **Task success** | 20% | Completes most requests, recovers from injected failures | Completes scripted requests | Rarely completes a request |
+| **Safety and validation** | 20% | Whitelist, validator, confirmation, and stop all demonstrated | Some safeguards present | Language reaches actuators unchecked |
+| **Robustness** | 15% | Handles ambiguity with clarifying questions and replanning | Fails gracefully with a message | Crashes or hangs on bad input |
+| **Engineering quality** | 10% | Tests, logs, and reproducible launch files | Runs from documented steps | Cannot be reproduced |
+| **Presentation** | 10% | Clear architecture, honest failure analysis | Clear demo | Unclear or incomplete |
+
+---
+
+## Exercises
+
+import { Exercise } from '@site/src/components/Exercise';
+
+<Exercise
+  title="Easy: Planner Concepts"
+  difficulty="beginner"
+  estimatedTime={10}
+  type="conceptual"
+>
+
+1. What do the "Say" and "Can" parts of SayCan each contribute?
+2. Give one advantage and one risk of Code-as-Policies compared with a JSON skill plan.
+3. List the three validation layers in order and explain why the cheapest runs first.
+
+</Exercise>
+
+<Exercise
+  title="Medium: Extend the Skill Library"
+  difficulty="intermediate"
+  estimatedTime={35}
+  type="coding"
+  hint="Add a doors field to WorldState and make navigate_to fail its precondition when the destination is behind a closed door."
+>
+
+1. Add an `open_door` skill with a precondition and effect.
+2. Write three plans by hand, one valid and two invalid, and confirm `validate_plan` accepts and rejects them with useful reasons.
+3. Add a few-shot example that uses `open_door`.
+
+</Exercise>
+
+<Exercise
+  title="Challenging: Failure Injection and Replanning"
+  difficulty="advanced"
+  estimatedTime={90}
+  type="hands-on"
+  hint="Implement a fake executor that fails a chosen step with a given probability, so you can test replanning without a simulator."
+>
+
+1. Run `plan_and_execute` with a fake executor that randomly fails `pick`.
+2. Measure how many replans are needed on average and how often the system escalates to `ask_human`.
+3. Compare two prompt variants (with and without few-shot examples) over the same set of instructions and report the rejection reasons you observe.
+
+</Exercise>

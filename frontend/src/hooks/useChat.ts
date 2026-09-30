@@ -5,10 +5,36 @@
 import { useState, useCallback, useRef } from 'react';
 import type { ChatSource } from '@site/src/context/ChatContext';
 
-// Get API URL
-const getApiUrl = (): string => {
-  return 'https://asadullahshafique-physical-ai-backend.hf.space';
-};
+// The optional Gemini RAG backend (FastAPI on Hugging Face Spaces).
+export const API_URL = 'https://asadullahshafique-physical-ai-backend.hf.space';
+const getApiUrl = (): string => API_URL;
+
+let readiness: Promise<boolean> | null = null;
+
+/**
+ * True only when the backend reports both its database and vector store up.
+ * Checked once per page load with a short timeout, so a sleeping or degraded
+ * backend never blocks the reader: the chat answers from the book instead.
+ */
+export function checkBackendReady(timeoutMs = 3500): Promise<boolean> {
+  if (!readiness) {
+    readiness = (async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(`${getApiUrl()}/api/health`, { signal: controller.signal });
+        if (!res.ok) return false;
+        const body = await res.json();
+        return body?.status === 'healthy' && body?.database === true && body?.vector_store === true;
+      } catch {
+        return false;
+      } finally {
+        clearTimeout(timer);
+      }
+    })();
+  }
+  return readiness;
+}
 
 export interface StreamingChatOptions {
   query: string;
@@ -104,6 +130,7 @@ export function useStreamingChat(): UseStreamingChatReturn {
         const decoder = new TextDecoder();
         let buffer = '';
 
+        // eslint-disable-next-line no-constant-condition -- read until the stream reports done
         while (true) {
           const { done, value } = await reader.read();
 
