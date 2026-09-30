@@ -114,7 +114,7 @@ async def ingest_content(
 
         try:
             # Generate embeddings
-            embeddings = await embeddings_service.embed_texts(texts)
+            embeddings = embeddings_service.embed_texts(texts)
 
             # Create points
             points = [

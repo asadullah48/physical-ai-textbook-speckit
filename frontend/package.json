@@ -5,7 +5,9 @@
   "description": "Physical AI & Humanoid Robotics Textbook - Panaversity",
   "scripts": {
     "docusaurus": "docusaurus",
+    "prestart": "node scripts/build-search-index.mjs",
     "start": "docusaurus start",
+    "prebuild": "node scripts/build-search-index.mjs",
     "build": "docusaurus build",
     "swizzle": "docusaurus swizzle",
     "deploy": "docusaurus deploy",
@@ -18,10 +20,12 @@
     "lint:fix": "eslint src --ext .ts,.tsx --fix",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,md,json}\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css,md,json}\"",
+    "pretest": "node scripts/build-search-index.mjs",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "generate-api-types": "openapi-typescript ../specs/001-physical-ai-textbook/contracts/openapi.yaml -o src/types/api.ts"
+    "generate-api-types": "openapi-typescript ../specs/001-physical-ai-textbook/contracts/openapi.yaml -o src/types/api.ts",
+    "search-index": "node scripts/build-search-index.mjs"
   },
   "dependencies": {
     "@docusaurus/core": "^3.1.0",

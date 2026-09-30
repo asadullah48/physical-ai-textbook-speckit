@@ -1,0 +1,379 @@
+---
+sidebar_position: 2
+title: ROS 2 Architecture
+description: ROS 2 design, DDS middleware, QoS, nodes, executors, topics and messages
+keywords: [ros2, dds, rmw, qos, nodes, topics, rclpy, executors]
+# Instructor metadata (T075)
+week: 3
+estimated_time: 90
+difficulty: intermediate
+learning_objectives:
+  - Explain the layered ROS 2 architecture from rclpy down to DDS
+  - Configure Quality of Service (QoS) policies and diagnose QoS mismatches
+  - Write, build and run rclpy publisher and subscriber nodes
+  - Inspect a running system with the ros2 command-line tools
+  - Define and build a custom message type
+prerequisites:
+  - module-1-intro/01-what-is-physical-ai
+  - module-1-intro/02-sensor-systems
+---
+
+# ROS 2 Architecture
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Explain the layered ROS 2 architecture from rclpy down to DDS
+2. Configure Quality of Service (QoS) policies and diagnose QoS mismatches
+3. Write, build and run rclpy publisher and subscriber nodes
+4. Inspect a running system with the `ros2` command-line tools
+5. Define and build a custom message type
+
+---
+
+## Introduction
+
+A humanoid robot is not one program. Joint encoders, IMUs, cameras, a balance controller, a walking planner and a speech interface all run at different rates, often on different computers. The **Robot Operating System 2 (ROS 2)** is the middleware that lets these pieces run as independent processes while exchanging typed data.
+
+ROS 2 is a redesign of ROS 1. The main changes were removing the single `roscore` master (discovery is now peer-to-peer), building on the industry-standard **DDS** (Data Distribution Service) protocol, and adding configurable **Quality of Service**, real-time friendly design and security features.
+
+:::info Distribution Assumption
+All examples in this module target **ROS 2 Humble Hawksbill** (Ubuntu 22.04) or **ROS 2 Jazzy Jalisco** (Ubuntu 24.04), both long-term support releases, using Python and `rclpy`. Unless noted, the code runs unchanged on both.
+:::
+
+## The Layered Design
+
+ROS 2 is built as a stack of layers, each with a narrow responsibility:
+
+```text
+Your nodes (Python / C++)
+  └─ rclpy / rclcpp     language client libraries
+      └─ rcl            common C core
+          └─ rmw        ROS middleware interface
+              └─ DDS    Fast DDS, Cyclone DDS, Connext, ...
+```
+
+- **rclpy / rclcpp** give you idiomatic APIs: nodes, publishers, timers.
+- **rcl** implements shared logic once in C, so Python and C++ behave the same way.
+- **rmw** is an abstraction layer. Swapping the middleware vendor does not change your code.
+- **DDS** handles discovery, serialization and transport over UDP or shared memory.
+
+You can select the middleware per process with an environment variable:
+
+```bash
+# Default in Humble and Jazzy is Fast DDS; switch to Cyclone DDS:
+sudo apt install ros-$ROS_DISTRO-rmw-cyclonedds-cpp
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ros2 run demo_nodes_py talker
+```
+
+Nodes discover each other automatically on the same network as long as they share a **domain ID**. Use `export ROS_DOMAIN_ID=7` to isolate your robot from a classmate's robot on the same Wi-Fi.
+
+## Quality of Service (QoS)
+
+DDS lets every publisher and subscriber declare how data should be delivered. ROS 2 exposes this as **QoS profiles**.
+
+| Policy | Options | Humanoid example |
+|--------|---------|------------------|
+| **Reliability** | `RELIABLE`, `BEST_EFFORT` | Commands: reliable. Camera frames: best effort |
+| **History** | `KEEP_LAST` (with depth), `KEEP_ALL` | Keep only the latest 10 joint states |
+| **Durability** | `VOLATILE`, `TRANSIENT_LOCAL` | Robot description: late joiners still receive it |
+| **Deadline** | Period | Warn if IMU data stops arriving on time |
+| **Liveliness** | `AUTOMATIC`, `MANUAL_BY_TOPIC` | Detect a crashed motor driver node |
+
+```python
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.qos import qos_profile_sensor_data
+
+# Commands to actuators: every message matters
+command_qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                         history=HistoryPolicy.KEEP_LAST, depth=10)
+
+# Latched configuration: late subscribers get the last value
+latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                         reliability=ReliabilityPolicy.RELIABLE)
+
+# High-rate sensors: prefer fresh data over complete data
+sensor_qos = qos_profile_sensor_data  # BEST_EFFORT, KEEP_LAST depth 5
+```
+
+:::warning QoS Compatibility
+A publisher and subscriber only connect if their policies are compatible. A `RELIABLE` subscriber will **not** receive data from a `BEST_EFFORT` publisher, while the reverse combination works. Mismatches fail quietly: no error in your callback, just no messages. Check with `ros2 topic info -v /topic_name`.
+:::
+
+## Nodes and Executors
+
+A **node** is the unit of computation: one responsibility, such as "read the IMU" or "compute the balance correction". Nodes own publishers, subscribers, timers, services and parameters.
+
+An **executor** decides which ready callback runs next. `rclpy.spin(node)` creates a `SingleThreadedExecutor` behind the scenes, so callbacks run one at a time.
+
+```python
+import rclpy
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.node import Node
+
+
+class TwoRateNode(Node):
+    def __init__(self):
+        super().__init__('two_rate_node')
+        # Callbacks in different groups may run in parallel threads
+        self.fast_group = MutuallyExclusiveCallbackGroup()
+        self.slow_group = MutuallyExclusiveCallbackGroup()
+        self.create_timer(0.002, self.balance_step, callback_group=self.fast_group)   # 500 Hz
+        self.create_timer(1.0, self.log_status, callback_group=self.slow_group)       # 1 Hz
+
+    def balance_step(self):
+        pass  # fast control math goes here
+
+    def log_status(self):
+        self.get_logger().info('still balancing')
+
+
+def main():
+    rclpy.init()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(TwoRateNode())
+    executor.spin()
+```
+
+A `MutuallyExclusiveCallbackGroup` guarantees its callbacks never overlap; a `ReentrantCallbackGroup` allows the same callback to run concurrently with itself. Python's global interpreter lock still limits true parallelism, so hard real-time control loops are usually written in C++.
+
+## Topics and Messages
+
+A **topic** is a named, typed, many-to-many data stream. Publishers do not know who is listening. Every topic carries exactly one **message type**, such as `sensor_msgs/msg/JointState`, whose fields (`header`, `name`, `position`, `velocity`, `effort`) you can list with `ros2 interface show sensor_msgs/msg/JointState`. Start by creating a Python package:
+
+```bash
+mkdir -p ~/humanoid_ws/src && cd ~/humanoid_ws/src
+ros2 pkg create --build-type ament_python humanoid_basics \
+  --dependencies rclpy sensor_msgs
+```
+
+### Publisher and Subscriber
+
+The following pair simulates a humanoid's leg joints and monitors them for limit violations.
+
+<Tabs>
+  <TabItem value="publisher" label="Publisher" default>
+
+```python
+# humanoid_basics/humanoid_basics/joint_state_publisher.py
+import math
+
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+
+JOINTS = ['l_hip_pitch', 'l_knee', 'l_ankle_pitch', 'r_hip_pitch', 'r_knee', 'r_ankle_pitch']
+
+class FakeJointStatePublisher(Node):
+    """Publishes a sinusoidal 'stepping in place' motion at 50 Hz."""
+
+    def __init__(self):
+        super().__init__('fake_joint_state_publisher')
+        self.publisher = self.create_publisher(JointState, 'joint_states', 10)
+        self.t = 0.0
+        self.dt = 0.02
+        self.timer = self.create_timer(self.dt, self.on_timer)
+
+    def on_timer(self):
+        phase = 2.0 * math.pi * 0.5 * self.t   # 0.5 Hz gait
+        left = math.sin(phase)
+        right = math.sin(phase + math.pi)      # legs half a cycle apart
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = JOINTS
+        msg.position = [0.4 * left, 0.8 * max(left, 0.0), -0.3 * left,
+                        0.4 * right, 0.8 * max(right, 0.0), -0.3 * right]
+        self.publisher.publish(msg)
+        self.t += self.dt
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(FakeJointStatePublisher())
+```
+
+  </TabItem>
+  <TabItem value="subscriber" label="Subscriber">
+
+```python
+# humanoid_basics/humanoid_basics/joint_monitor.py
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+
+# Soft limits in radians (lower, upper)
+LIMITS = {'l_knee': (0.0, 0.75), 'r_knee': (0.0, 0.75)}
+
+class JointMonitor(Node):
+    def __init__(self):
+        super().__init__('joint_monitor')
+        self.subscription = self.create_subscription(
+            JointState, 'joint_states', self.on_joint_state, 10)
+
+    def on_joint_state(self, msg: JointState):
+        for name, position in zip(msg.name, msg.position):
+            if name not in LIMITS:
+                continue
+            low, high = LIMITS[name]
+            if not low <= position <= high:
+                self.get_logger().warn(
+                    f'{name} at {position:.3f} rad outside [{low}, {high}]',
+                    throttle_duration_sec=1.0)
+
+
+def main():
+    rclpy.init()
+    rclpy.spin(JointMonitor())
+```
+
+  </TabItem>
+</Tabs>
+
+Register both executables in `setup.py`, then build and run:
+
+```python
+entry_points={
+    'console_scripts': [
+        'fake_joints = humanoid_basics.joint_state_publisher:main',
+        'joint_monitor = humanoid_basics.joint_monitor:main',
+    ],
+},
+```
+
+```bash
+cd ~/humanoid_ws
+colcon build --packages-select humanoid_basics --symlink-install
+source install/setup.bash
+ros2 run humanoid_basics fake_joints      # terminal 1
+ros2 run humanoid_basics joint_monitor    # terminal 2
+```
+
+The monitor warns roughly once per second, because the publisher drives the knees to 0.8 rad, above the 0.75 rad soft limit.
+
+## Introspection with the CLI
+
+The `ros2` command is your debugger. Run these while the nodes above are active:
+
+```bash
+ros2 node list                        # /fake_joint_state_publisher, /joint_monitor
+ros2 node info /joint_monitor         # its subscriptions, publishers, services
+ros2 topic list -t                    # topics with their types
+ros2 topic echo /joint_states --once  # print a single message
+ros2 topic hz /joint_states           # measured publish rate (about 50 Hz)
+ros2 topic info -v /joint_states      # endpoints and their QoS
+ros2 topic pub --once /joint_states sensor_msgs/msg/JointState \
+  "{name: ['l_knee'], position: [1.2]}"   # inject a test message
+```
+
+`rqt_graph` shows the same information as a live node graph.
+
+## Custom Messages
+
+Standard messages cover most data, but sometimes you need your own, for example a balance controller's summary of the robot's stability. Interfaces must be generated by an **ament_cmake** package, even if your nodes are in Python. A common convention is a dedicated `*_interfaces` package:
+
+```bash
+cd ~/humanoid_ws/src
+ros2 pkg create --build-type ament_cmake humanoid_interfaces && mkdir humanoid_interfaces/msg
+```
+
+```text
+# humanoid_interfaces/msg/BalanceState.msg
+std_msgs/Header header
+geometry_msgs/Point center_of_mass      # in base_link frame, metres
+geometry_msgs/Point zmp                 # zero-moment point estimate
+bool is_stable
+float32 support_margin                  # distance from ZMP to support polygon edge
+uint8 SUPPORT_DOUBLE=0
+uint8 SUPPORT_LEFT=1
+uint8 SUPPORT_RIGHT=2
+uint8 support_phase
+```
+
+Field names use `snake_case`, type names use `CamelCase`, and `NAME=value` lines define constants. Add the generator to `CMakeLists.txt` (before `ament_package()`) and the dependencies to `package.xml`:
+
+```cmake
+find_package(rosidl_default_generators REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/BalanceState.msg"
+  DEPENDENCIES std_msgs geometry_msgs
+)
+```
+
+```xml
+<buildtool_depend>rosidl_default_generators</buildtool_depend>
+<depend>std_msgs</depend>
+<depend>geometry_msgs</depend>
+<exec_depend>rosidl_default_runtime</exec_depend>
+<member_of_group>rosidl_interface_packages</member_of_group>
+```
+
+After `colcon build` and sourcing, use it like any other message: `from humanoid_interfaces.msg import BalanceState`, and check it with `ros2 interface show humanoid_interfaces/msg/BalanceState`.
+
+## Common Pitfalls
+
+- **Forgetting to source.** Every new terminal needs `source /opt/ros/$ROS_DISTRO/setup.bash` and `source install/setup.bash`. "Package not found" almost always means this.
+- **Silent QoS mismatch.** A reliable subscriber on a best-effort sensor topic receives nothing. Use `ros2 topic info -v`.
+- **Different domain IDs.** Two terminals with different `ROS_DOMAIN_ID` values cannot see each other's nodes.
+- **Blocking a callback.** A `time.sleep()` or long computation inside a callback stalls every other callback on a single-threaded executor.
+- **Mismatched message types.** Two nodes using the same topic name with different types do not connect; `ros2 topic list -t` shows the conflict.
+- **Custom messages in an ament_python package.** Interface generation requires `ament_cmake`.
+
+## Summary
+
+- ROS 2 is layered: client libraries sit on `rcl`, which talks to DDS through the `rmw` abstraction
+- Discovery is decentralized; `ROS_DOMAIN_ID` separates robots on a shared network
+- QoS policies (reliability, history, durability) must be compatible for data to flow
+- Nodes hold the logic; executors and callback groups decide how callbacks are scheduled
+- Topics are typed, anonymous, many-to-many streams; the `ros2` CLI inspects them live
+- Custom messages live in an `ament_cmake` interfaces package built with `rosidl`
+
+---
+
+## Exercises
+
+import { Exercise } from '@site/src/components/Exercise';
+
+<Exercise
+  title="Easy: Architecture and QoS Check"
+  difficulty="beginner"
+  estimatedTime={15}
+  type="conceptual"
+>
+
+1. What is the role of the `rmw` layer, and what changes in your code if you switch from Fast DDS to Cyclone DDS?
+2. A camera driver publishes with `BEST_EFFORT` reliability. Your subscriber uses the default profile with depth 10. Will it receive images? Why?
+3. Which QoS durability setting lets a node that starts late still receive the last published message?
+
+</Exercise>
+
+<Exercise
+  title="Medium: Joint Velocity Estimator"
+  difficulty="intermediate"
+  estimatedTime={30}
+  type="coding"
+  hint="Store the previous message's positions and header stamp. Convert stamps to seconds with stamp.sec + stamp.nanosec * 1e-9 before differencing."
+>
+
+Extend the `humanoid_basics` package with a node that subscribes to `/joint_states`, estimates each joint's velocity by finite differences, and republishes a `JointState` on `/joint_states_with_velocity` with the `velocity` array filled in. Verify the output with `ros2 topic echo` and `ros2 topic hz`.
+
+</Exercise>
+
+<Exercise
+  title="Challenging: Balance Monitor with a Custom Message"
+  difficulty="advanced"
+  estimatedTime={60}
+  type="hands-on"
+  hint="Put the message in humanoid_interfaces (ament_cmake) and the node in humanoid_basics (ament_python). Add humanoid_interfaces as a dependency in the Python package's package.xml."
+>
+
+Build the `BalanceState` message from this chapter. Write a node that publishes it at 100 Hz with a `TRANSIENT_LOCAL`, `RELIABLE` profile, switching `support_phase` between left and right every second, and a second node that subscribes with a `VOLATILE` profile and logs when `is_stable` becomes false. Then change the subscriber to `TRANSIENT_LOCAL` and start it after the publisher. Document what `ros2 topic info -v` reports in each case and explain the difference.
+
+</Exercise>

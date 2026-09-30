@@ -8,8 +8,8 @@
 An interactive educational platform for learning Physical AI, ROS 2, and Humanoid Robotics with AI-powered assistance.
 
 ## ✨ Features Implemented
-- ✅ **5 Comprehensive Modules** - Physical AI, ROS 2, Simulation, NVIDIA Isaac, VLA Systems
-- ✅ **RAG Chatbot UI** - Powered by Google Gemini AI (backend ready)
+- ✅ **5 Modules, 16 Chapters** - Physical AI, ROS 2, Simulation, NVIDIA Isaac, VLA Systems (modules 2-5 completed after the hackathon, 2026-09-30)
+- ✅ **RAG Chatbot** - Gemini RAG when the backend is healthy; otherwise in-browser retrieval over the whole book with cited sections
 - ✅ **Selection Q&A** - Highlight text and ask questions
 - ✅ **User Authentication** - JWT-based secure login
 - ✅ **Progress Tracking** - Track learning progress across modules
@@ -22,7 +22,7 @@ An interactive educational platform for learning Physical AI, ROS 2, and Humanoi
 **Backend:** FastAPI, Python 3.11+  
 **AI/ML:** Google Gemini (chat + text-embedding-004)  
 **Databases:** Neon Serverless Postgres, Qdrant Vector DB  
-**Deployment:** GitHub Pages  
+**Deployment:** GitHub Pages via GitHub Actions  
 
 ## 🏗️ Architecture
 - Specification-first development using Spec-Kit Plus methodology

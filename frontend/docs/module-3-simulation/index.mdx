@@ -6,18 +6,22 @@ description: Simulation Environments for Robot Development
 
 # Module 3: Simulation Environments
 
-This module covers simulation tools essential for safe and efficient robot development.
+Simulation lets you develop and test robot software without risking hardware: controllers can be tried thousands of times, failures can be reproduced exactly, and experiments can run faster than real time. This two-week module (weeks 6-7) uses **Gazebo Harmonic** with **ROS 2 Jazzy** to build simulated worlds, equip robots with realistic sensors, and prepare controllers for the move to real hardware.
 
 ## Topics Covered
 
-- Gazebo physics simulation
-- Unity-based rendering
-- Sensor simulation
-- Sim-to-real transfer
+- Gazebo architecture, physics engines, and SDF world creation
+- Spawning URDF robots from ROS 2 with `ros_gz_sim`
+- Simulated cameras, depth cameras, LiDAR, IMUs, and contact/force-torque sensors
+- Bridging sensor data to ROS 2 and visualising it in RViz2
+- Unity as a rendering alternative
+- Sim-to-real transfer: domain randomization, system identification, and validation
 
 ## Chapters
 
-*Chapters coming soon*
+1. [Gazebo Fundamentals](./gazebo-fundamentals) — architecture, physics settings, SDF worlds, and spawning robots
+2. [Sensor Simulation](./sensor-simulation) — sensor models with noise, `ros_gz_bridge`, rclpy, RViz2, and Unity
+3. [Sim-to-Real Transfer](./sim-to-real) — the reality gap, randomization, system identification, and a hardware validation checklist
 
 ## Prerequisites
 

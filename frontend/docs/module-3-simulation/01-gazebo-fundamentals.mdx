@@ -1,0 +1,379 @@
+---
+sidebar_position: 2
+title: Gazebo Fundamentals
+description: Modern Gazebo (gz sim Harmonic) architecture, physics configuration, SDF worlds, and spawning ROS 2 robots
+keywords: [gazebo, gz-sim, harmonic, sdf, urdf, ros2, jazzy, simulation, physics]
+# Instructor metadata (T075)
+week: 6
+estimated_time: 60
+difficulty: intermediate
+learning_objectives:
+  - Describe the architecture of modern Gazebo (server, GUI, systems, transport)
+  - Configure a physics engine, step size, and real-time factor for a simulation
+  - Author an SDF world with a ground plane, lighting, and a simple model
+  - Spawn a URDF robot into Gazebo from ROS 2 using ros_gz_sim
+prerequisites:
+  - module-1-intro/02-sensor-systems
+  - module-2-ros2/index
+---
+
+# Gazebo Fundamentals
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Describe the architecture of modern Gazebo (server, GUI, systems, transport)
+2. Configure a physics engine, step size, and real-time factor for a simulation
+3. Author an SDF world with a ground plane, lighting, and a simple model
+4. Spawn a URDF robot into Gazebo from ROS 2 using `ros_gz_sim`
+
+---
+
+## Introduction
+
+Before a humanoid takes its first real step, it takes thousands of simulated ones. Simulation lets you test controllers without risking hardware, reproduce bugs deterministically, and run experiments faster than real time. **Gazebo** is the open-source simulator most tightly integrated with ROS 2, and it is the workhorse for this module.
+
+:::info Version Assumptions
+This chapter targets **Gazebo Harmonic** (an LTS release) paired with **ROS 2 Jazzy Jalisco** on Ubuntu 24.04, which is the officially recommended pairing. Commands use the modern `gz` CLI. If you use a different Gazebo release, plugin file names and some SDF tags may differ — check the release documentation.
+:::
+
+:::warning Gazebo Classic Is End-of-Life
+The older simulator — now called **Gazebo Classic** (versions up to Gazebo 11, launched with the `gazebo` command) — reached end-of-life in January 2025. Many online tutorials still use Classic syntax such as `libgazebo_ros_camera.so` plugins or `gazebo_ros` packages. Those do not work with modern Gazebo. If a tutorial mentions `gazebo_ros_pkgs`, it is Classic.
+:::
+
+## Installing Gazebo with ROS 2 Jazzy
+
+The simplest route is to install the ROS-packaged Gazebo integration, which pulls in the matching Gazebo Harmonic libraries:
+
+```bash
+# Assumes ROS 2 Jazzy is already installed and sourced
+sudo apt update
+sudo apt install ros-jazzy-ros-gz
+
+# Verify the simulator starts (opens the GUI with an example world)
+gz sim shapes.sdf
+```
+
+The `ros-jazzy-ros-gz` metapackage includes `ros_gz_sim` (launching and spawning), `ros_gz_bridge` (topic bridging), and `ros_gz_image` (efficient image transport).
+
+## Gazebo Architecture
+
+Modern Gazebo is a collection of libraries (`gz-sim`, `gz-physics`, `gz-sensors`, `gz-rendering`, `gz-transport`, `gz-msgs`, and `sdformat`) rather than a single monolithic program.
+
+```text
+┌─────────────── gz sim ───────────────┐
+│  Server: ECS + Systems (plugins)     │      ┌──────────────────┐
+│   Physics │ Sensors │ UserCommands   │◄────►│  GUI (optional)  │
+│   SceneBroadcaster │ ...             │      └──────────────────┘
+└──────────────────┬───────────────────┘   gz-transport topics/services
+                   ▼
+            ros_gz_bridge  ◄──►  ROS 2 nodes
+```
+
+### Server and GUI
+
+The **server** owns the simulation state and steps physics. The **GUI** is only a client that renders what the server broadcasts. They can run in one process or separately:
+
+```bash
+# Server + GUI together, start running immediately (-r)
+gz sim -r my_world.sdf
+
+# Server only (headless) — ideal for CI or remote machines
+gz sim -s -r my_world.sdf
+
+# GUI only, connecting to an already running server
+gz sim -g
+```
+
+### Entity Component System and Systems
+
+Internally, every object (world, model, link, joint, sensor) is an **entity** holding **components** (pose, mass, velocity, and so on). Behaviour is implemented by **systems** — plugins that read and write components each iteration. Physics, sensors, and even user commands from the GUI are all systems. If a system is not loaded, its feature simply does not exist: a world without the Sensors system produces no camera images.
+
+### Transport
+
+`gz-transport` is a publish/subscribe and service middleware, similar in spirit to ROS 2 but independent from it. You can inspect it directly:
+
+```bash
+gz topic -l                        # list topics
+gz topic -e -t /clock              # echo a topic
+gz topic -i -t /world/demo/stats   # show publishers and message type
+```
+
+ROS 2 cannot see these topics directly — that is the job of `ros_gz_bridge`, covered in the next chapter.
+
+## Physics Engines, Step Size, and Real-Time Factor
+
+`gz-physics` is an abstraction with interchangeable engine plugins:
+
+| Engine plugin | Typical use | Notes |
+|---------------|-------------|-------|
+| **DART** (`gz-physics-dartsim-plugin`) | General articulated robots | Default engine in Harmonic |
+| **Bullet Featherstone** (`gz-physics-bullet-featherstone-plugin`) | Articulated bodies, many contacts | Reduced-coordinate articulations |
+| **TPE** (`gz-physics-tpe-plugin`) | Large numbers of simple kinematic objects | Trivial Physics Engine: no dynamics, only basic collision checking |
+
+Two parameters control time in every simulation:
+
+- **`max_step_size`** — the physics time step in seconds. Smaller steps are more accurate and stable, but cost more computation per simulated second.
+- **`real_time_factor`** (RTF) — the target ratio of simulated time to wall-clock time. A value of 1.0 means "try to run at real-time speed"; 0 means "run as fast as possible".
+
+A third quantity, the **achieved** RTF, is what you actually get. If each step takes longer to compute than `max_step_size`, the simulation falls behind real time regardless of the target. The GUI shows the achieved RTF in the bottom-right corner.
+
+:::tip Choosing a Step Size for Humanoids
+Legged robots have stiff contacts and fast balance loops. A step of 1 ms (`0.001`) is a common starting point. Make sure your controller rate is an integer divisor of the physics rate — for example, a 500 Hz controller on a 1 kHz physics loop — so that commands align with physics steps.
+:::
+
+<Tabs>
+<TabItem value="sdf" label="In the world file" default>
+
+```xml
+<physics name="1ms" type="ignored">
+  <max_step_size>0.001</max_step_size>
+  <real_time_factor>1.0</real_time_factor>
+</physics>
+
+<plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics">
+  <engine>
+    <filename>gz-physics-bullet-featherstone-plugin</filename>
+  </engine>
+</plugin>
+```
+
+The `type="ignored"` attribute is literal: Gazebo selects the engine through the Physics system plugin, not through the `type` attribute.
+
+</TabItem>
+<TabItem value="cli" label="From the command line">
+
+```bash
+# Override the physics engine for one run
+gz sim -r --physics-engine gz-physics-bullet-featherstone-plugin my_world.sdf
+
+# Run headless and as fast as possible for batch experiments
+# (set real_time_factor to 0 in the world file first)
+gz sim -s -r --iterations 10000 my_world.sdf
+```
+
+</TabItem>
+</Tabs>
+
+## Creating an SDF World
+
+**SDF** (Simulation Description Format) describes entire worlds: lights, models, physics settings, and plugins. URDF, which you met with ROS 2, describes only a single robot. Save the following as `humanoid_lab.sdf`:
+
+```xml
+<?xml version="1.0" ?>
+<sdf version="1.10">
+  <world name="humanoid_lab">
+
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <!-- Core systems: physics, GUI commands, and state broadcasting -->
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+
+    <gravity>0 0 -9.81</gravity>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <surface>
+            <friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material><diffuse>0.7 0.7 0.7 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- A 0.5 m box obstacle with explicit mass and inertia -->
+    <model name="obstacle_box">
+      <pose>2.0 0 0.25 0 0 0</pose>
+      <link name="link">
+        <inertial>
+          <mass>5.0</mass>
+          <inertia><ixx>0.2083</ixx><iyy>0.2083</iyy><izz>0.2083</izz></inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry><box><size>0.5 0.5 0.5</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.5 0.5 0.5</size></box></geometry>
+          <material><diffuse>0.8 0.2 0.2 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>
+```
+
+The box inertia follows the solid-cuboid formula: each diagonal term equals `m * (a² + b²) / 12`, which for a 5 kg, 0.5 m cube gives about 0.2083 kg·m². Run it with `gz sim -r humanoid_lab.sdf`. Always validate your files before debugging behaviour:
+
+```bash
+gz sdf -k humanoid_lab.sdf   # check the file for errors
+gz sdf -p robot.urdf         # print the SDF that a URDF converts to
+```
+
+## Spawning a URDF Robot
+
+Your robot description from Module 2 is most likely URDF (often generated from Xacro). Gazebo converts URDF to SDF automatically when spawning. The robot must have an `<inertial>` block on every non-fixed link, and `<collision>` geometry wherever it should touch the world.
+
+The `ros_gz_sim` package provides a `create` node that spawns a model from a file, from a string, or from the `robot_description` topic published by `robot_state_publisher`:
+
+```bash
+# Terminal 1: start Gazebo with the world
+ros2 launch ros_gz_sim gz_sim.launch.py gz_args:="-r humanoid_lab.sdf"
+
+# Terminal 2: spawn from a URDF file, 1 m above the ground
+ros2 run ros_gz_sim create -world humanoid_lab -file my_humanoid.urdf \
+    -name my_humanoid -x 0 -y 0 -z 1.0
+```
+
+Meshes referenced with `package://` URIs must be findable by Gazebo. Add your package's share directory's parent to `GZ_SIM_RESOURCE_PATH`, or install meshes so that the ROS-to-Gazebo path resolution in `ros_gz_sim` can locate them.
+
+## Putting It Together: A ros_gz_sim Launch File
+
+In practice you launch the simulator, the robot description, and the spawner together:
+
+```python
+# launch/sim.launch.py
+import os
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_ros.actions import Node
+import xacro
+
+
+def generate_launch_description():
+    pkg_share = get_package_share_directory('my_humanoid_sim')
+    ros_gz_sim_share = get_package_share_directory('ros_gz_sim')
+
+    world = os.path.join(pkg_share, 'worlds', 'humanoid_lab.sdf')
+    urdf_xacro = os.path.join(pkg_share, 'urdf', 'my_humanoid.urdf.xacro')
+    robot_description = xacro.process_file(urdf_xacro).toxml()
+
+    gazebo = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(ros_gz_sim_share, 'launch', 'gz_sim.launch.py')),
+        launch_arguments={'gz_args': f'-r {world}'}.items(),
+    )
+
+    robot_state_publisher = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        parameters=[{'robot_description': robot_description,
+                     'use_sim_time': True}],
+    )
+
+    spawn = Node(
+        package='ros_gz_sim',
+        executable='create',
+        arguments=['-topic', 'robot_description',
+                   '-name', 'my_humanoid', '-z', '1.0'],
+        output='screen',
+    )
+
+    return LaunchDescription([gazebo, robot_state_publisher, spawn])
+```
+
+Note `use_sim_time: True`. Every ROS 2 node in a simulated system should use simulation time, which requires bridging the Gazebo `/clock` topic — you will set that up in the next chapter. Joint-level control is typically added with `gz_ros2_control`, which connects `ros2_control` controllers to Gazebo joints.
+
+## Common Pitfalls
+
+- **Mixing Classic and modern syntax**: plugins named `libgazebo_ros_*.so` or tags from Gazebo Classic tutorials are silently ignored or rejected by `gz sim`.
+- **Missing systems**: a world without the Physics, UserCommands, or SceneBroadcaster systems may load but appear frozen, or the GUI may show nothing. If you define any plugin in the world, Gazebo stops loading its default systems, so list all the ones you need.
+- **Links without inertia**: URDF links with no `<inertial>` element are dropped or merged during conversion, and zero or tiny inertias cause explosions. Compute realistic values from CAD or geometric formulas.
+- **Robot spawned inside the ground**: spawn with a positive `-z` offset so the feet start above the plane.
+- **Meshes not found**: models appear invisible or without collisions; check `GZ_SIM_RESOURCE_PATH` and the console for resource-lookup errors.
+- **Low achieved RTF**: very small step sizes, high-polygon collision meshes, and many contacts slow everything down. Use simple primitives for collisions and detailed meshes only for visuals.
+
+## Summary
+
+- **Modern Gazebo** (Harmonic with ROS 2 Jazzy) replaces Gazebo Classic, which is end-of-life
+- The **server** runs the simulation; the **GUI** is an optional client; features come from **systems** (plugins)
+- `gz-transport` carries Gazebo's own topics and services, separate from ROS 2
+- **Step size** trades accuracy for speed; **real-time factor** sets the target speed of simulated time
+- **SDF** describes whole worlds; URDF robots are converted to SDF when spawned with `ros_gz_sim create`
+- A launch file combining `gz_sim.launch.py`, `robot_state_publisher`, and the spawner is the standard entry point
+
+## What's Next?
+
+In the next chapter, we add **simulated sensors** to the robot and bridge their data into ROS 2.
+
+---
+
+## Exercises
+
+import { Exercise } from '@site/src/components/Exercise';
+
+<Exercise
+  title="Easy: Gazebo Architecture Check"
+  difficulty="beginner"
+  estimatedTime={10}
+  type="conceptual"
+>
+
+Answer the following questions:
+
+1. What is the difference between the Gazebo server and the GUI? Why is it useful that they can run separately?
+2. What happens to the achieved real-time factor if one physics step takes longer to compute than `max_step_size`?
+3. Name two signs that a tutorial you found online targets Gazebo Classic rather than modern Gazebo.
+
+</Exercise>
+
+<Exercise
+  title="Medium: Gazebo World with Obstacles"
+  difficulty="intermediate"
+  estimatedTime={30}
+  type="hands-on"
+  hint="Reuse the obstacle_box model with different poses and names. Use the cylinder inertia formulas: ixx = iyy = m(3r² + h²)/12 and izz = mr²/2."
+>
+
+Extend `humanoid_lab.sdf` to include:
+
+1. Three box obstacles and one cylinder obstacle at different positions, each with correct mass and inertia
+2. A low ramp (a rotated static box) that a robot could walk up
+3. A second physics configuration: run the world once with a 1 ms step and once with a 4 ms step, and record the achieved RTF shown in the GUI for each
+
+Validate the file with `gz sdf -k` before running it.
+
+</Exercise>
+
+<Exercise
+  title="Challenging: Import Your Robot into Gazebo"
+  difficulty="advanced"
+  estimatedTime={60}
+  type="hands-on"
+  hint="Start with a two-link arm before trying a full humanoid. Use gz sdf -p on your URDF to see exactly what Gazebo receives."
+>
+
+Create a ROS 2 package `my_humanoid_sim` containing:
+
+1. A URDF or Xacro description of a simple robot with at least three links, each with collision geometry and computed inertia
+2. The `humanoid_lab.sdf` world in a `worlds/` folder, installed through `CMakeLists.txt` or `setup.py`
+3. A launch file that starts Gazebo, `robot_state_publisher`, and spawns the robot
+
+Document which physics engine you used and why, and report what happens when you deliberately remove the inertial block from one link.
+
+</Exercise>

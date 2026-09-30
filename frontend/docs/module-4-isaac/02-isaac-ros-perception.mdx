@@ -1,0 +1,377 @@
+---
+sidebar_position: 3
+title: Isaac ROS Perception
+description: GPU-accelerated ROS 2 perception with Isaac ROS, NITROS, cuVSLAM, nvblox, the Isaac Sim ROS 2 bridge, and Replicator synthetic data
+keywords: [isaac-ros, nitros, visual-slam, cuvslam, nvblox, ros2, replicator, synthetic-data]
+# Instructor metadata (T075)
+week: 9
+estimated_time: 80
+difficulty: advanced
+learning_objectives:
+  - Explain how Isaac ROS and NITROS accelerate ROS 2 perception on NVIDIA GPUs
+  - Configure and launch Isaac ROS Visual SLAM (cuVSLAM) with stereo and IMU input
+  - Describe how nvblox builds 3D reconstructions and costmaps for navigation
+  - Publish simulated sensor data from Isaac Sim to ROS 2 through the ROS 2 bridge
+  - Generate labeled synthetic datasets with Omniverse Replicator
+prerequisites:
+  - module-4-isaac/01-isaac-sim-and-usd
+---
+
+# Isaac ROS Perception Pipelines
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## Learning Objectives
+
+By the end of this chapter, you will be able to:
+
+1. Explain how Isaac ROS and NITROS accelerate ROS 2 perception on NVIDIA GPUs
+2. Configure and launch Isaac ROS Visual SLAM (cuVSLAM) with stereo and IMU input
+3. Describe how nvblox builds 3D reconstructions and costmaps for navigation
+4. Publish simulated sensor data from Isaac Sim to ROS 2 through the ROS 2 bridge
+5. Generate labeled synthetic datasets with Omniverse Replicator
+
+---
+
+## Introduction
+
+A humanoid walking through a building must answer two questions continuously: **where am I?** and **what is around me?** Answering them requires processing multiple camera streams, depth data, and IMU readings with low latency, on a computer that fits inside the robot.
+
+**Isaac ROS** is NVIDIA's collection of GPU-accelerated ROS 2 packages built for this job. They run on NVIDIA Jetson modules and on desktop GPUs, and they plug into a standard ROS 2 graph, so they can be mixed with any other ROS 2 node you have written in Module 2.
+
+:::caution Version assumption
+Examples in this chapter assume **Isaac ROS 3.x on ROS 2 Humble**, typically run inside NVIDIA's Isaac ROS development container. Isaac ROS releases track specific ROS 2 distributions and JetPack versions, and parameter and topic names have changed between releases. Before copying a launch file, compare it with the documentation for the exact release you installed.
+:::
+
+## Isaac ROS and NITROS
+
+A conventional ROS 2 pipeline copies each image from GPU to CPU, serializes it into a message, and copies it back to the GPU in the next node. For high-resolution stereo streams these copies can dominate the pipeline's latency.
+
+**NITROS** (NVIDIA Isaac Transport for ROS) removes that overhead. It builds on two ROS 2 Humble features:
+
+- **Type adaptation** (REP 2007): a node can publish a custom in-memory type, such as a GPU buffer, and ROS 2 converts it to a standard message only when a subscriber actually needs one.
+- **Type negotiation** (REP 2009): connected nodes agree on the most efficient shared format.
+
+When two NITROS-enabled nodes run as **composable nodes in the same process**, image data can stay in GPU memory across the whole chain instead of making a GPU to CPU to GPU round trip at every hop.
+
+:::note When NITROS does not help
+The zero-copy benefit only applies between NITROS-enabled nodes in the same component container. A regular `rclpy` or `rclcpp` subscriber still receives a normal ROS 2 message, which forces a conversion. Design pipelines so the heavy GPU stages sit next to each other.
+:::
+
+### Key Isaac ROS Packages
+
+| Package | Purpose | Typical inputs | Typical outputs |
+|---------|---------|----------------|-----------------|
+| `isaac_ros_visual_slam` | Stereo visual-inertial odometry and SLAM (cuVSLAM) | Stereo images, camera info, IMU | Odometry, TF, SLAM path |
+| `nvblox_ros` | GPU 3D reconstruction and ESDF | Depth or 3D lidar, color, pose | Mesh, ESDF, 2D costmap slice |
+| `isaac_ros_image_proc` | Rectification, resize, format conversion | Raw images | Rectified images |
+| `isaac_ros_dnn_inference` | TensorRT and Triton inference | Tensors | Tensors |
+
+## Visual SLAM with cuVSLAM
+
+**Isaac ROS Visual SLAM** wraps NVIDIA's **cuVSLAM** library. It tracks visual features across stereo image pairs to estimate camera motion (visual odometry) and, optionally, fuses IMU data and builds a map with loop closure.
+
+For a humanoid, visual-inertial odometry is especially valuable: walking produces large, jerky head motion, and the IMU helps the tracker through fast rotations and brief moments of poor visual texture.
+
+### Launch File
+
+Isaac ROS nodes are shipped as **composable nodes**. The launch file below loads cuVSLAM into a multithreaded component container.
+
+```python
+# launch/humanoid_vslam.launch.py
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import ComposableNodeContainer
+from launch_ros.descriptions import ComposableNode
+
+
+def generate_launch_description():
+    use_sim_time = LaunchConfiguration("use_sim_time")
+
+    visual_slam = ComposableNode(
+        package="isaac_ros_visual_slam",
+        plugin="nvidia::isaac_ros::visual_slam::VisualSlamNode",
+        name="visual_slam_node",
+        parameters=[{
+            "use_sim_time": use_sim_time,
+            "num_cameras": 2,                 # one stereo pair
+            "rectified_images": True,
+            "enable_imu_fusion": True,
+            # add gyro/accel noise parameters from your IMU datasheet here
+            "base_frame": "base_link",
+            "odom_frame": "odom",
+            "map_frame": "map",
+            "imu_frame": "imu_link",
+            "enable_slam_visualization": True,
+        }],
+        remappings=[
+            ("visual_slam/image_0", "/head_camera/left/image_rect"),
+            ("visual_slam/camera_info_0", "/head_camera/left/camera_info"),
+            ("visual_slam/image_1", "/head_camera/right/image_rect"),
+            ("visual_slam/camera_info_1", "/head_camera/right/camera_info"),
+            ("visual_slam/imu", "/imu/data"),
+        ],
+    )
+
+    container = ComposableNodeContainer(
+        name="perception_container",
+        namespace="",
+        package="rclcpp_components",
+        executable="component_container_mt",
+        composable_node_descriptions=[visual_slam],
+        output="screen",
+    )
+
+    return LaunchDescription([
+        DeclareLaunchArgument("use_sim_time", default_value="true"),
+        container,
+    ])
+```
+
+### Topic Graph
+
+```text
+/head_camera/left/image_rect ─┐
+/head_camera/left/camera_info ┤
+/head_camera/right/image_rect ┼──> visual_slam_node ──> /visual_slam/tracking/odometry
+/head_camera/right/camera_info┤         │           ──> /visual_slam/tracking/slam_path
+/imu/data ────────────────────┘         │           ──> /visual_slam/status
+                                        └──> TF: map → odom → base_link
+```
+
+### Verifying the Pipeline
+
+<Tabs>
+  <TabItem value="cli" label="CLI checks" default>
+    Confirm that inputs arrive at the expected rate and that odometry is being produced.
+
+    ```bash
+    # Inputs: both cameras should report similar, steady rates
+    ros2 topic hz /head_camera/left/image_rect
+    ros2 topic hz /head_camera/right/image_rect
+
+    # Output odometry and tracker status
+    ros2 topic echo /visual_slam/tracking/odometry --once
+    ros2 topic echo /visual_slam/status --once
+
+    # TF chain must be complete: map -> odom -> base_link -> camera frames
+    ros2 run tf2_tools view_frames
+    ```
+  </TabItem>
+  <TabItem value="rviz" label="RViz2">
+    Launch `rviz2`, set the fixed frame to `map`, and add:
+
+    - a **TF** display to see the camera trajectory
+    - a **Path** display on `/visual_slam/tracking/slam_path`
+    - **Image** displays for both rectified camera streams
+
+    If the path jumps or drifts quickly, check camera calibration and time synchronization before tuning anything else.
+  </TabItem>
+</Tabs>
+
+## 3D Reconstruction with nvblox
+
+Visual SLAM tells the robot where it is. **nvblox** tells it what the world looks like. It fuses depth images (or 3D lidar scans) with the robot's pose into a voxel grid on the GPU, producing:
+
+- a **TSDF** (truncated signed distance field) used to extract a surface **mesh** for visualization
+- an **ESDF** (Euclidean signed distance field) giving the distance to the nearest obstacle for any point
+- a **2D costmap slice** of the ESDF, which Nav2 can consume through an nvblox costmap layer
+
+```python
+# Added to the same container as visual_slam_node
+nvblox = ComposableNode(
+    package="nvblox_ros",
+    plugin="nvblox::NvbloxNode",
+    name="nvblox_node",
+    parameters=[{
+        "use_sim_time": True,
+        "global_frame": "odom",       # pose comes from TF published by VSLAM
+        "voxel_size": 0.05,           # meters; smaller = more detail, more GPU memory
+    }],
+    remappings=[
+        ("camera_0/depth/image", "/head_camera/depth/image_rect_raw"),
+        ("camera_0/depth/camera_info", "/head_camera/depth/camera_info"),
+        ("camera_0/color/image", "/head_camera/color/image_raw"),
+        ("camera_0/color/camera_info", "/head_camera/color/camera_info"),
+    ],
+)
+```
+
+:::caution Check nvblox topic names for your release
+nvblox's input topic names and parameter layout have changed across releases (for example, single-camera versus multi-camera naming). Use `ros2 node info /nvblox_node` after launching to see the exact topics your version subscribes to, and remap accordingly.
+:::
+
+For a humanoid, the choice of height band for the 2D slice matters: it should cover everything between the floor and the top of the robot's head, otherwise overhanging obstacles such as tables will be invisible to the planner.
+
+## The Isaac Sim ROS 2 Bridge
+
+To develop this pipeline without hardware, publish sensor data from Isaac Sim. In Isaac Sim 4.x the **`omni.isaac.ros2_bridge`** extension provides OmniGraph nodes that publish clocks, cameras, joint states, TF, and IMU data as standard ROS 2 topics.
+
+The script below builds a minimal graph that publishes simulation time on `/clock`, which every node using `use_sim_time` depends on.
+
+```python
+from omni.isaac.kit import SimulationApp
+simulation_app = SimulationApp({"headless": True})
+
+import omni.graph.core as og
+from omni.isaac.core import World
+from omni.isaac.core.utils.extensions import enable_extension
+
+enable_extension("omni.isaac.ros2_bridge")   # renamed isaacsim.ros2.bridge in 4.5+
+simulation_app.update()
+
+world = World(stage_units_in_meters=1.0)
+
+og.Controller.edit(
+    {"graph_path": "/World/ROS2Graph", "evaluator_name": "execution"},
+    {
+        og.Controller.Keys.CREATE_NODES: [
+            ("OnTick", "omni.graph.action.OnPlaybackTick"),
+            ("SimTime", "omni.isaac.core_nodes.IsaacReadSimulationTime"),
+            ("PublishClock", "omni.isaac.ros2_bridge.ROS2PublishClock"),
+        ],
+        og.Controller.Keys.CONNECT: [
+            ("OnTick.outputs:tick", "PublishClock.inputs:execIn"),
+            ("SimTime.outputs:simulationTime", "PublishClock.inputs:timeStamp"),
+        ],
+    },
+)
+
+world.reset()
+while simulation_app.is_running():
+    world.step(render=True)
+
+simulation_app.close()
+```
+
+Camera, IMU, and joint-state publishers follow the same pattern with nodes such as `ROS2CameraHelper`, `ROS2PublishImu`, and `ROS2PublishJointState`. Many teams build the graph once in the GUI (the Action Graph editor) and save it into the scene's USD file rather than scripting every node.
+
+## Synthetic Data with Replicator
+
+Perception models need labeled data, and labeling real images by hand is slow. **Omniverse Replicator** generates images together with **ground-truth annotations** (bounding boxes, segmentation masks, depth) directly from the simulator, while randomizing poses, lighting, and materials so the model does not overfit to one scene. This practice is called **domain randomization**.
+
+```python
+from omni.isaac.kit import SimulationApp
+simulation_app = SimulationApp({"headless": True})
+
+import omni.replicator.core as rep
+
+with rep.new_layer():
+    camera = rep.create.camera(position=(0, -4, 2), look_at=(0, 0, 0.5))
+    render_product = rep.create.render_product(camera, (1024, 768))
+
+    rep.create.plane(scale=10)
+    boxes = rep.create.cube(count=8, scale=0.3, semantics=[("class", "box")])
+    light = rep.create.light(light_type="Sphere", position=(2, -2, 4))
+
+    # Re-randomize the scene on every generated frame
+    with rep.trigger.on_frame(num_frames=200):
+        with boxes:
+            rep.modify.pose(
+                position=rep.distribution.uniform((-2, -2, 0.15), (2, 2, 0.15)),
+                rotation=rep.distribution.uniform((0, 0, -180), (0, 0, 180)),
+            )
+        with light:
+            rep.modify.attribute("intensity", rep.distribution.uniform(5000, 30000))
+
+    writer = rep.WriterRegistry.get("BasicWriter")
+    writer.initialize(
+        output_dir="_out_boxes",
+        rgb=True,
+        bounding_box_2d_tight=True,
+        semantic_segmentation=True,
+    )
+    writer.attach([render_product])
+
+rep.orchestrator.run()
+simulation_app.close()
+```
+
+Each frame produces an RGB image plus annotation files. The `semantics` label attached to the cubes is what makes them appear in bounding boxes and segmentation masks.
+
+| Data source | Strengths | Weaknesses |
+|-------------|-----------|------------|
+| **Real, hand-labeled** | Matches deployment conditions exactly | Slow and costly to label; rare cases are hard to capture |
+| **Synthetic (Replicator)** | Perfect labels, unlimited variation, rare cases on demand | Sim-to-real gap in appearance and sensor noise |
+| **Mixed** | Synthetic breadth plus real-world grounding | Requires careful dataset balancing and validation |
+
+## Common Pitfalls
+
+- **Mismatched ROS 2 environments.** Isaac Sim and your nodes must agree on ROS distribution, RMW implementation, and `ROS_DOMAIN_ID`, or topics silently fail to appear.
+- **Sim time mismatch.** Nodes with `use_sim_time` set to true block or behave strangely if `/clock` is not published. Publish the clock from Isaac Sim and set `use_sim_time` consistently on every node.
+- **Broken TF tree.** VSLAM publishes `map` to `odom` to `base_link`; if another node also publishes `odom` to `base_link` (for example leg odometry), the transforms fight. Decide which node owns each transform.
+- **Unrectified images.** Setting `rectified_images` to true while feeding raw images degrades tracking. Rectify upstream or tell the node the truth.
+- **Unsynchronized stereo.** Left and right images with mismatched timestamps cause poor depth and tracking. Use hardware-synchronized cameras or confirm that simulated cameras render on the same tick.
+- **Copying launch files across releases.** Parameter names change. Use `ros2 param list` on the running node to see what it actually accepts.
+- **Synthetic-only training.** Models trained only on synthetic data often underperform on real images. Always validate on a real held-out set.
+
+## Summary
+
+- **Isaac ROS** provides GPU-accelerated ROS 2 packages; **NITROS** keeps data on the GPU between NITROS-enabled composable nodes
+- **Isaac ROS Visual SLAM** (cuVSLAM) estimates pose from stereo cameras with optional IMU fusion and publishes odometry and TF
+- **nvblox** fuses depth and pose into TSDF and ESDF maps and can provide a costmap to Nav2
+- The **ROS 2 bridge** in Isaac Sim publishes simulated sensors as ROS 2 topics through OmniGraph
+- **Replicator** generates perfectly labeled synthetic data with domain randomization
+
+## What's Next?
+
+With the robot able to localize and map, the next chapter uses **Nav2** to plan paths and examines how humanoids actually walk along them.
+
+---
+
+## Exercises
+
+import { Exercise } from '@site/src/components/Exercise';
+
+<Exercise
+  title="Concept Check: GPU Perception"
+  difficulty="beginner"
+  estimatedTime={15}
+  type="conceptual"
+>
+
+Answer the following questions:
+
+1. What two ROS 2 mechanisms does NITROS rely on, and what does each one do?
+2. Why does placing a plain `rclpy` subscriber between two Isaac ROS nodes reduce the benefit of NITROS?
+3. What is the difference between the TSDF and the ESDF produced by nvblox?
+
+</Exercise>
+
+<Exercise
+  title="Coding: Simulated Stereo Head for VSLAM"
+  difficulty="intermediate"
+  estimatedTime={60}
+  type="coding"
+  hint="Build the camera publishers in the Action Graph editor first, save the scene, then reproduce the graph with og.Controller.edit once you know which node types and inputs you need."
+>
+
+In Isaac Sim, mount a stereo camera pair and an IMU on a robot's head link and publish them to ROS 2 using the bridge. Then:
+
+1. Remap the topics into the VSLAM launch file from this chapter
+2. Drive the robot around a textured room
+3. Record `/visual_slam/tracking/slam_path` and compare it with the ground-truth pose from Isaac Sim
+4. Report the difference with IMU fusion enabled and disabled
+
+</Exercise>
+
+<Exercise
+  title="Hands-on Lab: Synthetic Dataset for Door Handle Detection"
+  difficulty="advanced"
+  estimatedTime={120}
+  type="hands-on"
+  hint="Randomize at least pose, lighting, and material. Keep a small set of real photos aside purely for evaluation, never for training."
+>
+
+A humanoid must find door handles to open doors. Design and build a Replicator pipeline that:
+
+1. Loads several door and handle assets with semantic labels
+2. Randomizes camera height to match a humanoid's head across different body poses
+3. Randomizes lighting, materials, and distractor objects
+4. Writes RGB images and 2D bounding boxes
+
+Train a detector of your choice on the output and evaluate it on real photos. Write a short analysis of which randomizations mattered most and where the sim-to-real gap remained.
+
+</Exercise>

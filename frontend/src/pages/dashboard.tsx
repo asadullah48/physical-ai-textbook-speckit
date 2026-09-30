@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import Layout from '@theme/Layout';
 import Link from '@docusaurus/Link';
 import styles from './index.module.css';
-import { useProgress, ProgressSummary, ContentProgress } from '../hooks/useProgress';
+import { useProgress, ProgressSummary } from '../hooks/useProgress';
 
 interface ModuleProgressData {
   moduleId: string;

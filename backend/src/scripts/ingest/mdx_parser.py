@@ -135,7 +135,9 @@ class MDXParser:
                 if part.startswith("module-"):
                     module_id = part
                     if i + 1 < len(parts):
-                        chapter_id = parts[i + 1].replace(".mdx", "")
+                        # Docusaurus drops the "01-" ordering prefix from doc ids, so
+                        # the stored id must too or chat source links 404.
+                        chapter_id = re.sub(r"^\d+-", "", parts[i + 1].replace(".mdx", ""))
                     break
 
         # Parse frontmatter

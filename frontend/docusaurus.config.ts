@@ -14,7 +14,11 @@ const config: Config = {
   organizationName: 'asadullah48',
   projectName: 'physical-ai-textbook-speckit',
   onBrokenLinks: 'throw',
-  onBrokenMarkdownLinks: 'warn',
+  markdown: {
+    hooks: {
+      onBrokenMarkdownLinks: 'throw',
+    },
+  },
   i18n: {
     defaultLocale: 'en',
     locales: ['en'],

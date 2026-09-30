@@ -6,19 +6,28 @@ description: NVIDIA Isaac Platform for Robotics
 
 # Module 4: NVIDIA Isaac Platform
 
-This module covers NVIDIA's Isaac platform for advanced robotics development.
+This module covers NVIDIA's Isaac platform for advanced robotics development. Over weeks 8 to 10 you move from authoring simulated scenes, to GPU-accelerated perception, to planning paths and understanding how a humanoid walks along them.
+
+The examples assume **Isaac Sim 4.x** (with the `omni.isaac.core` API), **Isaac ROS 3.x**, and **ROS 2 Humble**. The NVIDIA stack evolves quickly, so each chapter states its version assumptions and points out where APIs have changed.
 
 ## Topics Covered
 
-- Isaac Sim environment
-- Isaac ROS integration
-- Visual SLAM (VSLAM)
-- Nav2 path planning
-- Bipedal locomotion
+- Isaac Sim environment and Universal Scene Description (USD)
+- Isaac ROS integration and NITROS acceleration
+- Visual SLAM (cuVSLAM) and nvblox 3D reconstruction
+- Synthetic data generation with Replicator
+- Nav2 path planning for humanoids
+- Bipedal locomotion, from ZMP and LIPM to RL policies in Isaac Lab
 
 ## Chapters
 
-*Chapters coming soon*
+1. [Isaac Sim and USD](./isaac-sim-and-usd) (Week 8): Omniverse architecture, USD stages, prims, layers, references, and variants, plus standalone Python simulation of an articulated robot
+2. [Isaac ROS Perception](./isaac-ros-perception) (Week 9): NITROS, Visual SLAM, nvblox, the Isaac Sim ROS 2 bridge, and synthetic data with Replicator
+3. [Navigation and Locomotion](./navigation-and-locomotion) (Week 10): Nav2 configuration, humanoid-specific navigation, gait phases, ZMP and LIPM balance, RL locomotion, and obstacle avoidance
+
+## Hardware Note
+
+Isaac Sim requires an NVIDIA RTX-class GPU. Check NVIDIA's current Isaac Sim requirements page before setting up a workstation, or use a cloud GPU instance.
 
 ## Prerequisites
 

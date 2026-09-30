@@ -142,7 +142,7 @@ export function AuthModal({ onSuccess, onClose }: AuthProps): JSX.Element {
         <div className={styles.switchMode}>
           {mode === 'login' ? (
             <>
-              Don't have an account?{' '}
+              Don&apos;t have an account?{' '}
               <button onClick={() => setMode('register')}>Sign up</button>
             </>
           ) : (

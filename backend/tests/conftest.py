@@ -1,25 +1,33 @@
-"""Pytest fixtures for backend tests."""
+"""Pytest fixtures for backend tests.
 
-import asyncio
-from typing import AsyncGenerator, Generator
+Settings are required at import time, so test values are set before the app
+is imported. No test talks to a real database, Qdrant or Gemini: those
+boundaries are replaced with fakes in the tests that need them.
+"""
 
-import pytest
-import pytest_asyncio
-from httpx import AsyncClient
+import os
 
-from src.api.main import app
+os.environ.update(
+    {
+        "DATABASE_URL": "postgresql://test:test@localhost:5432/test",
+        "QDRANT_URL": "http://localhost:6333",
+        "QDRANT_API_KEY": "test-qdrant-key",
+        "GOOGLE_API_KEY": "test-google-key",
+        "JWT_SECRET_KEY": "test-secret-key-that-is-long-enough-for-hs256",
+        "APP_ENV": "test",
+    }
+)
 
+from typing import AsyncGenerator  # noqa: E402
 
-@pytest.fixture(scope="session")
-def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
-    """Create an event loop for the test session."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
+import pytest_asyncio  # noqa: E402
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+
+from src.api.main import app  # noqa: E402
 
 
 @pytest_asyncio.fixture
 async def client() -> AsyncGenerator[AsyncClient, None]:
-    """Create an async HTTP client for testing."""
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    """Async HTTP client bound to the app in-process."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac

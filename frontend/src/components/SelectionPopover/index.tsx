@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useChat } from '@site/src/context/ChatContext';
 import { useTextSelection, getChapterIdFromPage } from '@site/src/hooks/useSelection';
 import styles from './styles.module.css';
